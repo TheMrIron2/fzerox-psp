@@ -170,6 +170,13 @@ void* Arena_Allocate(s32 allocationType, size_t size) {
     s32 j;
     s32 temp;
 
+    /* Guard against an init path zeroing the arena table before first use */
+    if (gArenaStartPtrs[0] == 0) {
+        Arena_DefaultStartInit();
+        Arena_EndInit();
+        PspLog("arena table reset\n");
+    }
+
     // Sets initial array of memory indexes and the sizes left in the 3 memory blocks
     for (i = 0; i < ARENA_COUNT; i++) {
         sortedArenaIndices[i] = i;
@@ -215,21 +222,7 @@ void* Arena_Allocate(s32 allocationType, size_t size) {
             allocatePtr = Arena_AllocateBack(sortedArenaIndices[i], size);
             break;
     }
-    if (size == 0x8000) {
-                             (int) allocationType, (unsigned) size, (int) i,
-                             (unsigned) (uintptr_t) allocatePtr, (unsigned) gArenaStartPtrs[0],
-                             (unsigned) gArenaStartPtrs[1], (unsigned) gArenaStartPtrs[2],
-                             (unsigned) gArenaEndPtrs[0], (unsigned) gArenaEndPtrs[1],
-                             (unsigned) gArenaEndPtrs[2]);
-                             (int) sortedArenaIndices[1], (int) sortedArenaIndices[2]);
-    }
     return allocatePtr;
-}
-
-void Arena_DebugDump(const char* tag) {
-                         (unsigned) gArenaStartPtrs[0], (unsigned) gArenaStartPtrs[1],
-                         (unsigned) gArenaStartPtrs[2], (unsigned) gArenaEndPtrs[0],
-                         (unsigned) gArenaEndPtrs[1], (unsigned) gArenaEndPtrs[2]);
 }
 
 uintptr_t Segment_SetPhysicalAddress(s32 segment, uintptr_t addr) {

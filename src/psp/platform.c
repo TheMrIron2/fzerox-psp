@@ -136,11 +136,26 @@ void PspPlatform_PollInput(OSContPad* pads) {
 void PspPlatform_RunGfxTask(OSTask* task) {
     (void) task;
     sGfxTaskCount++;
+
+    /* No RSP/RDP runs; report SP and DP completion so scheduling advances */
+    if (sEvents[OS_EVENT_SP].mq != NULL) {
+        osSendMesg(sEvents[OS_EVENT_SP].mq, sEvents[OS_EVENT_SP].msg, OS_MESG_NOBLOCK);
+    }
+    if (sEvents[OS_EVENT_DP].mq != NULL) {
+        osSendMesg(sEvents[OS_EVENT_DP].mq, sEvents[OS_EVENT_DP].msg, OS_MESG_NOBLOCK);
+    }
 }
 
 void PspPlatform_RunAudioTask(OSTask* task) {
     (void) task;
     sAudioTaskCount++;
+
+    if (sEvents[OS_EVENT_SP].mq != NULL) {
+        osSendMesg(sEvents[OS_EVENT_SP].mq, sEvents[OS_EVENT_SP].msg, OS_MESG_NOBLOCK);
+    }
+    if (sEvents[OS_EVENT_AI].mq != NULL) {
+        osSendMesg(sEvents[OS_EVENT_AI].mq, sEvents[OS_EVENT_AI].msg, OS_MESG_NOBLOCK);
+    }
 }
 
 void PspPlatform_Log(const char* message) {
