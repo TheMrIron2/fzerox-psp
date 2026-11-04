@@ -8,6 +8,8 @@
 #include "n64psp/renderer.h"
 #include "n64psp/runtime.h"
 
+#include "src/psp/psp.h"
+
 PSP_MODULE_INFO("F-Zero X", PSP_MODULE_USER, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_SIZE_KB(-1024);
@@ -85,7 +87,12 @@ int main(int argc, char* argv[]) {
     pspDebugScreenPrintf("F-Zero X\n");
     pspDebugScreenPrintf("PSP bootstrap build\n\n");
 
-    init_n64psp();
+    if (init_n64psp()) {
+        PspPlatform_Init();
+#ifndef PSP_FULL
+        PspSelfTest_Run();
+#endif
+    }
 
     pspDebugScreenPrintf("\nPress HOME to exit\n");
 

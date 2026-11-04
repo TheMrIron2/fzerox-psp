@@ -69,6 +69,9 @@ endif
 IINC := -Iinclude -I. -Ilib/n64psp/include
 IINC += -I$(PSPDEV)/psp/include -I$(PSPSDK)/include
 
+PSP_WARNINGS := -Wall -Wextra -Wno-unused-parameter
+$(BUILD_DIR)/src/psp/%.o: CFLAGS += $(PSP_WARNINGS)
+
 LDFLAGS := -L$(PSPDEV)/psp/lib -L$(PSPSDK)/lib
 LDFLAGS += -Wl,-zmax-page-size=128 -Wl,-Map,$(PSP_MAP)
 LDFLAGS += -specs=$(PSPSDK)/lib/prxspecs
