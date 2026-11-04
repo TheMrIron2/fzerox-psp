@@ -16,3 +16,9 @@
 [submodule "tools/leo64dd_python"]
 	path = tools/leo64dd_python
 	url = https://github.com/inspectredc/leo64dd_python.git
+[submodule "lib/n64psp"]
+	path = lib/n64psp
+	url = https://github.com/TheMrIron2/n64psp.git
+[submodule "lib/pspgl"]
+	path = lib/pspgl
+	url = https://github.com/TheMrIron2/pspgl.git
