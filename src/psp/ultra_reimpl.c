@@ -8,6 +8,7 @@
 
 #include <pspkernel.h>
 #include <pspintrman.h>
+#include <pspdebug.h>
 #include <stdint.h>
 
 #define PSP_N64_TICKS_PER_SECOND 46875000ULL
@@ -122,6 +123,7 @@ void osStartThread(OSThread* thread) {
             if (sThreads[i].threadId >= 0) {
                 thread->state = OS_STATE_RUNNING;
                 sceKernelStartThread(sThreads[i].threadId, sizeof(threadArg), &threadArg);
+                pspDebugScreenPrintf("[os] thread %d start\n", (int) thread->id);
             } else {
                 sThreads[i].active = 0;
             }
@@ -426,9 +428,12 @@ void osExit(void) {
     sceKernelExitGame();
 }
 
+void osSetEventMesg(OSEvent event, OSMesgQueue* mq, OSMesg msg) {
+    PspPlatform_SetEventMesg(event, mq, msg);
+}
+
 /* Video interface */
-static OSViMode* sViMode;
-static void* sViCurrentBuffer;
+static OSViMode* sViMode;static void* sViCurrentBuffer;
 static void* sViNextBuffer;
 static u8 sViBlack;
 

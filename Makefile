@@ -21,7 +21,7 @@ REV     ?= rev0
 
 PSP_FULL ?= 0
 PSP_TITLE ?= F-Zero X
-BUILD_DIR ?= build/psp
+BUILD_DIR ?= $(if $(filter 1,$(PSP_FULL)),build/psp-full,build/psp)
 
 PSP_CONFIG ?= psp-config
 PSP_PRXGEN ?= psp-prxgen
@@ -64,9 +64,10 @@ CFLAGS += -ffunction-sections -fdata-sections
 
 ifeq ($(PSP_FULL),1)
 CFLAGS += -DVERSION_US=1 -DNDEBUG -DNON_MATCHING -DAVOID_UB -DCOMPILER_GCC -DPSP_FULL=1
+CFLAGS += -DASSET_VERSION=$(VERSION) -DASSET_REVISION=$(REV)
 endif
 
-IINC := -Iinclude -I. -Ilib/n64psp/include
+IINC := -Iinclude -I. -Ibin/$(VERSION)/$(REV) -Ilib/n64psp/include
 IINC += -I$(PSPDEV)/psp/include -I$(PSPSDK)/include
 
 PSP_WARNINGS := -Wall -Wextra -Wno-unused-parameter

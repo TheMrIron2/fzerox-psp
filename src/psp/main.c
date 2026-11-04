@@ -10,6 +10,10 @@
 
 #include "src/psp/psp.h"
 
+#ifdef PSP_FULL
+void bootproc(void);
+#endif
+
 PSP_MODULE_INFO("F-Zero X", PSP_MODULE_USER, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_SIZE_KB(-1024);
@@ -85,11 +89,19 @@ int main(int argc, char* argv[]) {
     scePowerSetClockFrequency(333, 333, 166);
 
     pspDebugScreenPrintf("F-Zero X\n");
+#ifdef PSP_FULL
+    pspDebugScreenPrintf("PSP game build\n\n");
+#else
     pspDebugScreenPrintf("PSP bootstrap build\n\n");
+#endif
 
     if (init_n64psp()) {
         PspPlatform_Init();
-#ifndef PSP_FULL
+#ifdef PSP_FULL
+        pspDebugScreenPrintf("[psp] bootproc enter\n");
+        bootproc();
+        pspDebugScreenPrintf("[psp] bootproc returned\n");
+#else
         PspSelfTest_Run();
 #endif
     }
