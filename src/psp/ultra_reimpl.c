@@ -5,11 +5,12 @@
 #include "PR/mbi.h"
 #include "PR/piint.h"
 #include "src/psp/platform.h"
+#include "src/psp/n64ram.h"
+#include "src/psp/psp.h"
 
 #include <pspkernel.h>
 #include <pspintrman.h>
 #include <pspdebug.h>
-#include <stdint.h>
 
 #define PSP_N64_TICKS_PER_SECOND 46875000ULL
 #define PSP_N64_THREAD_STACK_SIZE 0x10000
@@ -123,7 +124,7 @@ void osStartThread(OSThread* thread) {
             if (sThreads[i].threadId >= 0) {
                 thread->state = OS_STATE_RUNNING;
                 sceKernelStartThread(sThreads[i].threadId, sizeof(threadArg), &threadArg);
-                pspDebugScreenPrintf("[os] thread %d start\n", (int) thread->id);
+                PspLog("[os] thread %d start\n", (int) thread->id);
             } else {
                 sThreads[i].active = 0;
             }
@@ -404,13 +405,26 @@ OSIntMask osSetIntMask(OSIntMask mask) {
     return old;
 }
 
-/* Address translation: PSP mapping is flat */
+/* Address translation: N64 KSEG0 range maps into the PSP shadow RAM */
 u32 osVirtualToPhysical(void* addr) {
-    return (u32) (uintptr_t) addr;
+    u32 value = (u32) addr;
+
+    if (value >= 0x80000000u && value < 0x80800000u) {
+        return (u32) (u32) (gPspN64Ram + (value - 0x80000000u));
+    }
+    return (u32) value;
 }
 
 void* osPhysicalToVirtual(u32 addr) {
-    return (void*) (uintptr_t) addr;
+    u32 value = addr;
+
+    if (value >= 0x80000000u && value < 0x80800000u) {
+        return gPspN64Ram + (value - 0x80000000u);
+    }
+    if (value < 0x800000u) {
+        return gPspN64Ram + value;
+    }
+    return (void*) value;
 }
 
 /* System */
@@ -583,6 +597,7 @@ OSMesgQueue* osPiGetCmdQueue(void) {
 
 s32 osPiStartDma(OSIoMesg* mb, s32 pri, s32 direction, u32 devAddr, void* dramAddr, u32 size, OSMesgQueue* mq) {
     (void) pri;
+    (void) direction;
 
     if (mb == NULL) {
         return -1;
@@ -593,9 +608,8 @@ s32 osPiStartDma(OSIoMesg* mb, s32 pri, s32 direction, u32 devAddr, void* dramAd
     mb->devAddr = devAddr;
     mb->size = size;
 
-    if (direction == OS_READ && devAddr != 0 && dramAddr != NULL && size != 0) {
-        psp_memcpy(dramAddr, (void*) (uintptr_t) devAddr, size);
-    }
+    /* devAddr is a ROM offset, not a host pointer; no ROM blob is embedded yet.
+     * Leave the destination untouched and just complete the transfer. */
     if (mq != NULL) {
         osSendMesg(mq, mb, OS_MESG_NOBLOCK);
     }
@@ -609,16 +623,18 @@ s32 osEPiStartDma(OSPiHandle* handle, OSIoMesg* mb, s32 direction) {
 
 s32 osEPiRawStartDma(OSPiHandle* handle, s32 direction, u32 devAddr, void* dramAddr, u32 size) {
     (void) handle;
-    if (direction == OS_READ && devAddr != 0 && dramAddr != NULL && size != 0) {
-        psp_memcpy(dramAddr, (void*) (uintptr_t) devAddr, size);
-    }
+    (void) direction;
+    (void) devAddr;
+    (void) dramAddr;
+    (void) size;
     return 0;
 }
 
 s32 osPiRawStartDma(s32 direction, u32 devAddr, void* dramAddr, u32 size) {
-    if (direction == OS_READ && devAddr != 0 && dramAddr != NULL && size != 0) {
-        psp_memcpy(dramAddr, (void*) (uintptr_t) devAddr, size);
-    }
+    (void) direction;
+    (void) devAddr;
+    (void) dramAddr;
+    (void) size;
     return 0;
 }
 

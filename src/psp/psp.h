@@ -5,5 +5,6 @@
 
 void PspPlatform_Init(void);
 void PspSelfTest_Run(void);
+void PspLog(const char* fmt, ...);
 
 #endif

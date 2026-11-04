@@ -2,6 +2,9 @@
 #include "fzx_game.h"
 #include "fzx_course.h"
 #include "segment_symbols.h"
+#include "src/psp/n64ram.h"
+
+#include "src/psp/psp.h"
 
 uintptr_t gSegments[16];
 uintptr_t gArenaStartPtrs[ARENA_COUNT];
@@ -110,11 +113,11 @@ void Arena_StartInit(void) {
 void Arena_DefaultStartInit(void) {
 #ifndef EXPANSION_KIT
     gArenaStartPtrs[0] = ALIGN16((uintptr_t) SEGMENT_VRAM_END(ovl_i10));
-    gArenaStartPtrs[1] = 0x803DA800;
+    gArenaStartPtrs[1] = N64_RAM_ADDR(0x3DA800);
     gArenaStartPtrs[2] = ALIGN16((uintptr_t) D_8024DC80);
 #else
     gArenaStartPtrs[0] = ALIGN16((uintptr_t) SEGMENT_VRAM_END(ovl_i10));
-    gArenaStartPtrs[1] = 0x803DD000;
+    gArenaStartPtrs[1] = N64_RAM_ADDR(0x3DD000);
     gArenaStartPtrs[2] = ALIGN16((uintptr_t) D_8024DC80);
     gArenaStartPtrs[3] = ALIGN16((uintptr_t) SEGMENT_VRAM_END(cartridge_offsets));
 #endif
@@ -122,14 +125,14 @@ void Arena_DefaultStartInit(void) {
 
 void Arena_EndInit(void) {
 #ifndef EXPANSION_KIT
-    gArenaEndPtrs[0] = 0x801D9800;
-    gArenaEndPtrs[1] = 0x803DA800;
+    gArenaEndPtrs[0] = N64_RAM_ADDR(0x1D9800);
+    gArenaEndPtrs[1] = N64_RAM_ADDR(0x3DA800);
     gArenaEndPtrs[2] = ALIGN16((uintptr_t) D_8024DC80);
 #else
-    gArenaEndPtrs[0] = 0x801D9800;
-    gArenaEndPtrs[1] = 0x803DD000;
+    gArenaEndPtrs[0] = N64_RAM_ADDR(0x1D9800);
+    gArenaEndPtrs[1] = N64_RAM_ADDR(0x3DD000);
     gArenaEndPtrs[2] = ALIGN16((uintptr_t) D_8024DC80);
-    gArenaEndPtrs[3] = 0x80800000;
+    gArenaEndPtrs[3] = N64_RAM_ADDR(0x800000);
 #endif
 }
 
@@ -212,7 +215,21 @@ void* Arena_Allocate(s32 allocationType, size_t size) {
             allocatePtr = Arena_AllocateBack(sortedArenaIndices[i], size);
             break;
     }
+    if (size == 0x8000) {
+                             (int) allocationType, (unsigned) size, (int) i,
+                             (unsigned) (uintptr_t) allocatePtr, (unsigned) gArenaStartPtrs[0],
+                             (unsigned) gArenaStartPtrs[1], (unsigned) gArenaStartPtrs[2],
+                             (unsigned) gArenaEndPtrs[0], (unsigned) gArenaEndPtrs[1],
+                             (unsigned) gArenaEndPtrs[2]);
+                             (int) sortedArenaIndices[1], (int) sortedArenaIndices[2]);
+    }
     return allocatePtr;
+}
+
+void Arena_DebugDump(const char* tag) {
+                         (unsigned) gArenaStartPtrs[0], (unsigned) gArenaStartPtrs[1],
+                         (unsigned) gArenaStartPtrs[2], (unsigned) gArenaEndPtrs[0],
+                         (unsigned) gArenaEndPtrs[1], (unsigned) gArenaEndPtrs[2]);
 }
 
 uintptr_t Segment_SetPhysicalAddress(s32 segment, uintptr_t addr) {
