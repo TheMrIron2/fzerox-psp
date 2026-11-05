@@ -213,6 +213,12 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     out[0] = v[0];
     out[1] = v[1];
     out[2] = v[2];
+    out[0].x = (v[0].x * s2dScaleX) + s2dOffsetX;
+    out[0].y = (v[0].y * s2dScaleY) + s2dOffsetY;
+    out[1].x = (v[1].x * s2dScaleX) + s2dOffsetX;
+    out[1].y = (v[1].y * s2dScaleY) + s2dOffsetY;
+    out[2].x = (v[2].x * s2dScaleX) + s2dOffsetX;
+    out[2].y = (v[2].y * s2dScaleY) + s2dOffsetY;
     sceGuDisable(GU_TEXTURE_2D);
     sceGuDrawArray(GU_TRIANGLES, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 3, NULL, out);
 }

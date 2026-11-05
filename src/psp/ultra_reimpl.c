@@ -19,7 +19,7 @@
 
 /* Globals expected by the libultra headers */
 u64 osClockRate = PSP_N64_TICKS_PER_SECOND;
-u32 osMemSize = 4 * 1024 * 1024;
+u32 osMemSize = 8 * 1024 * 1024; /* matches the 8 MB RDRAM shadow */
 s32 osTvType = OS_TV_NTSC;
 s32 osResetType = 0;
 s32 osRomType = 0;
@@ -71,8 +71,23 @@ static s32 psp_thread_priority_from_os(OSPri pri) {
     return lowest - ((pri * (lowest - highest)) / OS_PRIORITY_MAX);
 }
 
+/* N64 does not trap FP exceptions; flush denormals and mask the enables.
+ * PSP FCR31 layout: enables at bit 7, cause at bit 12, FS at bit 24. */
+static void psp_fpu_init(void) {
+    u32 fcr31;
+
+    __asm__ volatile("cfc1 %0, $31" : "=r"(fcr31));
+    fcr31 &= ~0x00000F80u;
+    fcr31 &= ~0x0003F000u;
+    fcr31 |= 0x01000000u;
+    fcr31 &= ~0x00000003u;
+    __asm__ volatile("ctc1 %0, $31" ::"r"(fcr31));
+}
+
 static int psp_thread_entry(SceSize args, void* argp) {
     PspThread* thread;
+
+    psp_fpu_init();
 
     if (args != sizeof(thread) || argp == NULL) {
         return -1;
@@ -431,6 +446,7 @@ void* osPhysicalToVirtual(u32 addr) {
 void osInitialize(void) {
     osTvType = OS_TV_NTSC;
     osResetType = 0;
+    psp_fpu_init();
     psp_timer_init();
 }
 

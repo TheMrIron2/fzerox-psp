@@ -1,5 +1,11 @@
 #include "global.h"
 
+#ifdef PSP
+/* No 64DD on PSP; the emulated PI always reads back zero */
+bool LeoDD_CheckPresence(void) {
+    return false;
+}
+#else
 bool LeoDD_CheckPresence(void) {
     OSPiHandle* leoHandle = osLeoDiskInit();
     u32 status;
@@ -12,3 +18,4 @@ bool LeoDD_CheckPresence(void) {
         return true;
     }
 }
+#endif

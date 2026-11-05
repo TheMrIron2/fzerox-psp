@@ -45,7 +45,13 @@
 #define TEX_SIZE_4B(tex) (TEX_WIDTH(tex) * TEX_HEIGHT(tex) / 2)
 
 #define PHYS_TO_K1ROM(x) (((u32) (x) | 0xB0000000))
+#ifdef PSP
+/* Cart ROM window is not mapped; serve the fixed words the game uses */
+unsigned int PspRomRead(unsigned int addr);
+#define ROM_READ(addr) (PspRomRead(addr))
+#else
 #define ROM_READ(addr) (*(vu32*) PHYS_TO_K1ROM(addr))
+#endif
 
 #if OS_TV_TYPE == OS_TV_TYPE_NTSC
 #define TIME_CONVERT(x) (x)

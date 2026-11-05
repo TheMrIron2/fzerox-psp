@@ -3823,6 +3823,10 @@ extern s32 D_xk2_800F7404;
 
 UNUSED s32 D_800CD21C = 0;
 
+#ifdef PSP
+CourseData* PspCourseData_Get(s32 index);
+#endif
+
 void Course_Load(s32 courseIndex) {
     s32 pad;
     s32 diskCourseIndex;
@@ -3837,12 +3841,22 @@ void Course_Load(s32 courseIndex) {
 #endif
 
     if (courseIndex >= COURSE_DEATH_RACE) {
+#ifdef PSP
+        {
+            CourseData* courseData = PspCourseData_Get(courseIndex - 30);
+
+            if (courseData != NULL) {
+                COURSE_CONTEXT()->courseData = *courseData;
+            }
+        }
+#else
 #ifndef EXPANSION_KIT
         romAddr = SEGMENT_ROM_START(course_data) + (courseIndex - 30) * sizeof(CourseData);
 #else
         romAddr = gRomSegmentPairs[5][0] + (courseIndex - 30) * sizeof(CourseData);
 #endif
         Dma_LoadAssetsAsync(romAddr, osVirtualToPhysical(&COURSE_CONTEXT()->courseData), sizeof(CourseData));
+#endif
         if ((gPlayer1OverallPosition >= 4) && (courseIndex == COURSE_ENDING)) {
             COURSE_CONTEXT()->courseData.skybox = SKYBOX_BLUE;
         }
@@ -3950,6 +3964,15 @@ void Course_Load(s32 courseIndex) {
         }
 #endif
 
+#ifdef PSP
+        {
+            CourseData* courseData = PspCourseData_Get(courseIndex);
+
+            if (courseData != NULL) {
+                COURSE_CONTEXT()->courseData = *courseData;
+            }
+        }
+#else
 #ifndef EXPANSION_KIT
         romAddr = SEGMENT_ROM_START(course_data) + courseIndex * sizeof(CourseData);
 #else
@@ -3958,6 +3981,7 @@ void Course_Load(s32 courseIndex) {
         PRINTF("UNPACK\n");
         Dma_LoadAssetsAsync(romAddr, osVirtualToPhysical(&COURSE_CONTEXT()->courseData), sizeof(CourseData));
         PRINTF("UNPACK OK\n");
+#endif
 
 #ifdef EXPANSION_KIT
         COURSE_CONTEXT()->courseData.bgm = D_i2_80106F14[courseIndex];

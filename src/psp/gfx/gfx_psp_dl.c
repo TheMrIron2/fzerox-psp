@@ -5,9 +5,24 @@
 #include "PR/gu.h"
 
 #define PSP_GFX_MAX_VTX 64
-#define PSP_TEX_SLOTS 16
-#define PSP_TEX_POOL_SIZE (1 << 20) /* 2 MB of RGBA4444 texels */
-#define PSP_TEX_MIN_HEIGHT 256
+#define PSP_TEX_SLOTS 64
+#define PSP_TEX_POOL_SIZE (1 << 21) /* 4 MB of RGBA4444 texels */
+#define PSP_TEX_MIN_HEIGHT 8
+
+extern u32 gSegments[16];
+
+/* Resolve N64 0x0Sxxxxxx segmented addresses; PSP host pointers pass through */
+static u32 psp_gfx_ram_addr(u32 addr) {
+    u32 seg;
+
+    if ((addr >= 0x01000000u) && (addr < 0x08000000u)) {
+        seg = (addr >> 24) & 0xF;
+        if (gSegments[seg] != 0) {
+            return (u32) (gSegments[seg] + (addr & 0x00FFFFFFu));
+        }
+    }
+    return addr;
+}
 
 static u32 sDrawCount;
 static u32 sBudget;
@@ -16,9 +31,15 @@ static u32 sTriCount;
 static u32 sTexRectCount;
 static u32 sOpHist[256];
 
+#define PSP_GFX_MTX_STACK 16
+
 /* Matrices and vertices */
 static float sModelView[4][4];
 static float sProjection[4][4];
+static float sModelViewStack[PSP_GFX_MTX_STACK][4][4];
+static float sProjectionStack[PSP_GFX_MTX_STACK][4][4];
+static int sModelViewDepth;
+static int sProjectionDepth;
 static Vp sViewport;
 static Vtx sVtx[PSP_GFX_MAX_VTX];
 
@@ -229,13 +250,21 @@ static u32 psp_gfx_next_pow2(u32 v) {
     return p;
 }
 
+static void psp_gfx_pool_full(void) {
+    static int sLogged;
+
+    if (!sLogged) {
+        sLogged = 1;
+        PspLog("[gfx] tex pool full\n");
+    }
+}
+
 static PspTexEntry* psp_gfx_tex_get(u32 addr, u32 fmt, u32 siz, u32 srcW, u32 maxRow) {
     PspTexEntry* e;
     u32 potW;
     u32 potH;
     u32 i;
     u32 count;
-    u16* pixels;
 
     if ((addr == 0) || (srcW == 0)) {
         return NULL;
@@ -244,6 +273,34 @@ static PspTexEntry* psp_gfx_tex_get(u32 addr, u32 fmt, u32 siz, u32 srcW, u32 ma
     for (i = 0; i < sTexEntryCount; i++) {
         e = &sTexEntries[i];
         if ((e->addr == addr) && (e->fmt == fmt) && (e->siz == siz) && (e->srcW == srcW)) {
+            if (maxRow <= e->potH) {
+                return e;
+            }
+            /* Grow in place; the old buffer stays for draws already queued */
+            potH = psp_gfx_next_pow2(maxRow);
+            if (potH > 512) {
+                return NULL;
+            }
+            count = e->potW * potH;
+            if ((sTexPoolUsed + count) > PSP_TEX_POOL_SIZE) {
+                psp_gfx_pool_full();
+                return NULL;
+            }
+            {
+                u16* pixels = &sTexPool[sTexPoolUsed];
+                u32 oldCount = e->potW * e->potH;
+                u32 j;
+
+                sTexPoolUsed += count;
+                for (j = 0; j < oldCount; j++) {
+                    pixels[j] = e->pixels[j];
+                }
+                for (; j < count; j++) {
+                    pixels[j] = 0;
+                }
+                e->pixels = pixels;
+                e->potH = potH;
+            }
             return e;
         }
     }
@@ -269,15 +326,8 @@ static PspTexEntry* psp_gfx_tex_get(u32 addr, u32 fmt, u32 siz, u32 srcW, u32 ma
 
     count = potW * potH;
     if ((sTexPoolUsed + count) > PSP_TEX_POOL_SIZE) {
-        PspLog("[gfx] tex pool full (%u texels)\n", (unsigned) sTexPoolUsed);
+        psp_gfx_pool_full();
         return NULL;
-    }
-
-    pixels = &sTexPool[sTexPoolUsed];
-    sTexPoolUsed += count;
-
-    for (i = 0; i < count; i++) {
-        pixels[i] = 0;
     }
 
     e = &sTexEntries[sTexEntryCount];
@@ -287,7 +337,11 @@ static PspTexEntry* psp_gfx_tex_get(u32 addr, u32 fmt, u32 siz, u32 srcW, u32 ma
     e->srcW = srcW;
     e->potW = potW;
     e->potH = potH;
-    e->pixels = pixels;
+    e->pixels = &sTexPool[sTexPoolUsed];
+    for (i = 0; i < count; i++) {
+        e->pixels[i] = 0;
+    }
+    sTexPoolUsed += count;
     sTexEntryCount++;
 
     return e;
@@ -404,7 +458,7 @@ static void psp_gfx_walk(const Gfx* dl) {
             case G_ENDDL:
                 return;
             case G_DL: {
-                const Gfx* sub = (const Gfx*)(u32) w1;
+                const Gfx* sub = (const Gfx*)(u32) psp_gfx_ram_addr(w1);
                 if (sub != NULL && sub != cur) {
                     psp_gfx_walk(sub);
                 }
@@ -413,7 +467,7 @@ static void psp_gfx_walk(const Gfx* dl) {
             case G_VTX: {
                 u32 n = _SHIFTR(w0, 12, 8);
                 u32 v0 = _SHIFTR(w0, 1, 7) - n;
-                const Vtx* src = (const Vtx*)(u32) w1;
+                const Vtx* src = (const Vtx*)(u32) psp_gfx_ram_addr(w1);
                 u32 i;
 
                 for (i = 0; i < n && (v0 + i) < PSP_GFX_MAX_VTX; i++) {
@@ -425,20 +479,37 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 params = (w0 & 0xFF) ^ G_MTX_PUSH;
                 float mf[4][4];
 
-                psp_gfx_mtx_l2f(mf, (const Mtx*)(u32) w1);
+                psp_gfx_mtx_l2f(mf, (const Mtx*)(u32) psp_gfx_ram_addr(w1));
 
                 if (params & G_MTX_PROJECTION) {
+                    if ((params & G_MTX_PUSH) && (sProjectionDepth < PSP_GFX_MTX_STACK)) {
+                        psp_gfx_mat_copy(sProjectionStack[sProjectionDepth], sProjection);
+                        sProjectionDepth++;
+                    }
                     if (params & G_MTX_LOAD) {
                         psp_gfx_mat_copy(sProjection, mf);
                     } else {
                         psp_gfx_mat_mul(sProjection, sProjection, mf);
                     }
                 } else {
+                    if ((params & G_MTX_PUSH) && (sModelViewDepth < PSP_GFX_MTX_STACK)) {
+                        psp_gfx_mat_copy(sModelViewStack[sModelViewDepth], sModelView);
+                        sModelViewDepth++;
+                    }
                     if (params & G_MTX_LOAD) {
                         psp_gfx_mat_copy(sModelView, mf);
                     } else {
                         psp_gfx_mat_mul(sModelView, sModelView, mf);
                     }
+                }
+                break;
+            }
+            case G_POPMTX: {
+                u32 n = w1;
+
+                while ((n-- != 0) && (sModelViewDepth > 0)) {
+                    sModelViewDepth--;
+                    psp_gfx_mat_copy(sModelView, sModelViewStack[sModelViewDepth]);
                 }
                 break;
             }
@@ -461,7 +532,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTexFmt = _SHIFTR(w0, 21, 3);
                 sTexSiz = _SHIFTR(w0, 19, 2);
                 sTexW = _SHIFTR(w0, 0, 12) + 1;
-                sTexAddr = w1;
+                sTexAddr = psp_gfx_ram_addr(w1);
                 break;
             case G_SETTILE: {
                 u32 fmt = _SHIFTR(w0, 21, 3);
@@ -546,6 +617,8 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         }
         psp_gfx_mat_identity(sModelView);
         psp_gfx_mat_identity(sProjection);
+        sModelViewDepth = 0;
+        sProjectionDepth = 0;
         sViewport.vp.vscale[0] = 240 * 4;
         sViewport.vp.vscale[1] = 136 * 4;
         sViewport.vp.vscale[2] = G_MAXZ;

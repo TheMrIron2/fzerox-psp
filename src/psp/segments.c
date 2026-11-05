@@ -6,6 +6,11 @@
 
 u8 gPspN64Ram[0x800000] __attribute__((aligned(64)));
 
+#ifndef PSP_FULL
+/* Bootstrap has no game segment table; keep the renderer linkable */
+u32 gSegments[16];
+#endif
+
 /* Assets are embedded in the ELF, not laid out as N64 segment .data */
 u32 PspSegment_DataSize(const char* name) {
     (void) name;

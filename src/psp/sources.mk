@@ -10,6 +10,7 @@ PSP_PLATFORM_C_FILES := \
     src/psp/ultra_reimpl.c \
     src/psp/os_stubs.c \
     src/psp/mio0.c \
+    src/psp/rom_data.c \
     src/psp/segments.c \
     src/psp/log.c \
     src/psp/gfx/gfx_psp_dl.c \
@@ -22,4 +23,4 @@ PSP_BOOTSTRAP_C_FILES := \
 
 # Full game build.
 include src/psp/game_sources.mk
-PSP_GAME_C_FILES := $(PSP_PLATFORM_C_FILES) $(PSP_GAME_SOURCES)
+PSP_GAME_C_FILES := $(PSP_PLATFORM_C_FILES) $(PSP_GAME_SOURCES) src/psp/course_data.c

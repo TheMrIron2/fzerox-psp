@@ -833,8 +833,14 @@
  * Common macros
  */
 #if defined(_LANGUAGE_C) || defined(_LANGUAGE_C_PLUS_PLUS)
+#ifdef PSP
+/* No RCP hardware; busy bits read as clear and writes are ignored */
+#define	IO_READ(addr)       (0u)
+#define	IO_WRITE(addr,data) ((void)0)
+#else
 #define	IO_READ(addr)       (*(vu32*)PHYS_TO_K1(addr))
 #define	IO_WRITE(addr,data) (*(vu32*)PHYS_TO_K1(addr)=(u32)(data))
+#endif
 #define RCP_STAT_PRINT                                              \
     rmonPrintf("current=%x start=%x end=%x dpstat=%x spstat=%x\n",	\
         IO_READ(DPC_CURRENT_REG),                                   \
