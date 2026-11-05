@@ -21,6 +21,10 @@ REV     ?= rev0
 
 PSP_FULL ?= 0
 PSP_TITLE ?= F-Zero X
+PSP_EBOOT_ICON ?= src/psp/EBOOT/ICON0.PNG
+PSP_EBOOT_PIC1 ?= src/psp/EBOOT/PIC1.PNG
+PSP_EBOOT_SND0 ?= src/psp/EBOOT/SND0.AT3
+
 BUILD_DIR ?= $(if $(filter 1,$(PSP_FULL)),build/psp-full,build/psp)
 
 PSP_CONFIG ?= psp-config
@@ -99,9 +103,9 @@ all: psp
 psp: $(PSP_EBOOT)
 	@printf 'EBOOT: %s\n' '$(PSP_EBOOT)'
 
-$(PSP_EBOOT): $(PSP_ELF) $(PSP_SFO)
+$(PSP_EBOOT): $(PSP_ELF) $(PSP_SFO) $(wildcard $(PSP_EBOOT_ICON) $(PSP_EBOOT_PIC1) $(PSP_EBOOT_SND0))
 	$(PSP_PRXGEN) $(PSP_ELF) $(PSP_PRX)
-	$(PACK_PBP) $@ $(PSP_SFO) NULL NULL NULL NULL NULL $(PSP_PRX) NULL
+	$(PACK_PBP) $@ $(PSP_SFO) $(PSP_EBOOT_ICON) NULL NULL $(PSP_EBOOT_PIC1) $(PSP_EBOOT_SND0) $(PSP_PRX) NULL
 
 $(PSP_SFO):
 	@mkdir -p $(dir $@)
