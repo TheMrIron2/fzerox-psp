@@ -6,5 +6,6 @@
 void PspPlatform_Init(void);
 void PspSelfTest_Run(void);
 void PspLog(const char* fmt, ...);
+void PspLog_SetScreen(int enable);
 
 #endif

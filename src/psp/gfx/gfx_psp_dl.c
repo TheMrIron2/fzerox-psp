@@ -26,16 +26,13 @@ static u32 psp_gfx_ram_addr(u32 addr) {
 
 static u32 sDrawCount;
 static u32 sBudget;
-static u32 sCmdCount;
-static u32 sTriCount;
-static u32 sTexRectCount;
-static u32 sOpHist[256];
 
 #define PSP_GFX_MTX_STACK 16
 
 /* Matrices and vertices */
 static float sModelView[4][4];
 static float sProjection[4][4];
+static float sMP[4][4];
 static float sModelViewStack[PSP_GFX_MTX_STACK][4][4];
 static float sProjectionStack[PSP_GFX_MTX_STACK][4][4];
 static int sModelViewDepth;
@@ -45,15 +42,25 @@ static Vtx sVtx[PSP_GFX_MAX_VTX];
 
 /* RDP state used by the 2D path */
 static u32 sTexAddr;
-static u32 sTexFmt;
 static u32 sTexSiz;
 static u32 sTexW;
 static u32 sTileFmt[8];
 static u32 sTileSiz[8];
+static u32 sTileWidth[8];
+static u32 sTileHeight[8];
+static u32 sTileUls[8];
+static u32 sTileUlt[8];
+static u32 sLoadAddr;
+static u32 sLoadW;
+static u32 sLoadSiz;
+static u32 sOtherModeH;
 static u32 sLoadUls;
 static u32 sLoadUlt;
-static int sLoadValid;
+static int sLoadBlock;
 static u32 sPrimColor = 0xFFFFFFFF;
+static u32 sPrimColor8888 = 0xFFFFFFFF;
+static u32 sCombineW0;
+static u32 sCombineW1;
 static u32 sFillColor;
 
 /* Decoded texture cache, rebuilt each display list */
@@ -62,6 +69,10 @@ typedef struct {
     u32 fmt;
     u32 siz;
     u32 srcW;
+    u32 width;
+    u32 height;
+    u32 srcX;
+    u32 srcY;
     u32 potW;
     u32 potH;
     u16* pixels;
@@ -71,8 +82,7 @@ static u16 sTexPool[PSP_TEX_POOL_SIZE] __attribute__((aligned(64)));
 static u32 sTexPoolUsed;
 static PspTexEntry sTexEntries[PSP_TEX_SLOTS];
 static u32 sTexEntryCount;
-
-static int sLoggedTex;
+static u32 sTexReplaceNext;
 
 static void psp_gfx_mat_identity(float m[4][4]) {
     int i, j;
@@ -145,7 +155,6 @@ static u32 psp_gfx_vertex_color(const Vtx* v) {
 static void psp_gfx_transform(int index, PspGfxVertex* out) {
     const Vtx* v;
     float p[4];
-    float mv[4];
     float clip[4];
     float w;
     int i;
@@ -164,12 +173,9 @@ static void psp_gfx_transform(int index, PspGfxVertex* out) {
     p[2] = (float) v->v.ob[2];
     p[3] = 1.0f;
 
+    /* N64/Fast3D row-vector convention: p' = p * (MV * P) */
     for (i = 0; i < 4; i++) {
-        mv[i] = sModelView[i][0] * p[0] + sModelView[i][1] * p[1] + sModelView[i][2] * p[2] + sModelView[i][3] * p[3];
-    }
-    for (i = 0; i < 4; i++) {
-        clip[i] =
-            sProjection[i][0] * mv[0] + sProjection[i][1] * mv[1] + sProjection[i][2] * mv[2] + sProjection[i][3] * mv[3];
+        clip[i] = p[0] * sMP[0][i] + p[1] * sMP[1][i] + p[2] * sMP[2][i] + p[3] * sMP[3][i];
     }
 
     w = clip[3];
@@ -190,7 +196,6 @@ static void psp_gfx_triangle(u32 i0, u32 i1, u32 i2) {
     psp_gfx_transform(i1, &tri[1]);
     psp_gfx_transform(i2, &tri[2]);
     PspGfx_DrawTriangle2D(tri);
-    sTriCount++;
 }
 
 static const u8* psp_gfx_tex_source(u32 addr) {
@@ -216,25 +221,62 @@ static u16 psp_gfx_rgba5551_to_4444(u32 texel) {
 static u16 psp_gfx_decode_texel(const PspTexEntry* e, const u8* src, s32 x, s32 y) {
     u32 idx;
 
+    x += e->srcX;
+    y += e->srcY;
+    idx = (u32) y * e->srcW + (u32) x;
     switch (e->fmt) {
-        case G_IM_FMT_RGBA:
-            idx = ((u32) y * e->srcW + (u32) x) * 2;
-            return psp_gfx_rgba5551_to_4444(((u32) src[idx] << 8) | src[idx + 1]);
+        case G_IM_FMT_RGBA: {
+            u32 texel;
+
+            if (e->siz != G_IM_SIZ_16b) {
+                return 0;
+            }
+            if ((u32) src < (u32) gPspN64Ram) {
+                texel = ((const u16*) src)[idx];
+            } else {
+                texel = ((u32) src[idx * 2] << 8) | src[idx * 2 + 1];
+            }
+            return psp_gfx_rgba5551_to_4444(texel);
+        }
         case G_IM_FMT_IA: {
             u32 i;
             u32 a;
 
-            idx = ((u32) y * e->srcW + (u32) x) * 2;
-            i = src[idx] >> 4;
-            a = src[idx + 1] >> 4;
+            if (e->siz == G_IM_SIZ_16b) {
+                if ((u32) src < (u32) gPspN64Ram) {
+                    u16 texel = ((const u16*) src)[idx];
+
+                    i = texel >> 12;
+                    a = (texel >> 4) & 0xF;
+                } else {
+                    i = src[idx * 2] >> 4;
+                    a = src[idx * 2 + 1] >> 4;
+                }
+            } else if (e->siz == G_IM_SIZ_8b) {
+                i = src[idx] >> 4;
+                a = src[idx] & 0xF;
+            } else if (e->siz == G_IM_SIZ_4b) {
+                u32 texel = (idx & 1) ? (src[idx >> 1] & 0xF) : (src[idx >> 1] >> 4);
+
+                i = texel >> 1;
+                i = (i << 1) | (i >> 2);
+                a = (texel & 1) ? 15 : 0;
+            } else {
+                return 0;
+            }
             return (u16) ((a << 12) | (i << 8) | (i << 4) | i);
         }
         case G_IM_FMT_I: {
             u32 i;
 
-            idx = ((u32) y * e->srcW + (u32) x) >> 1;
-            i = (x & 1) ? (src[idx] & 0xF) : (src[idx] >> 4);
-            return (u16) (0xF000 | (i << 8) | (i << 4) | i);
+            if (e->siz == G_IM_SIZ_8b) {
+                i = src[idx] >> 4;
+            } else if (e->siz == G_IM_SIZ_4b) {
+                i = (idx & 1) ? (src[idx >> 1] & 0xF) : (src[idx >> 1] >> 4);
+            } else {
+                return 0;
+            }
+            return (u16) ((i << 12) | (i << 8) | (i << 4) | i);
         }
         default:
             return 0;
@@ -250,124 +292,81 @@ static u32 psp_gfx_next_pow2(u32 v) {
     return p;
 }
 
-static void psp_gfx_pool_full(void) {
+static void psp_gfx_pool_full(u32 requested) {
     static int sLogged;
 
     if (!sLogged) {
         sLogged = 1;
-        PspLog("[gfx] tex pool full\n");
+        PspLog("[gfx] tex pool full bytes=%u requested=%u limit=%u\n",
+               (unsigned) (sTexPoolUsed * sizeof(u16)), (unsigned) (requested * sizeof(u16)),
+               (unsigned) sizeof(sTexPool));
     }
 }
 
-static PspTexEntry* psp_gfx_tex_get(u32 addr, u32 fmt, u32 siz, u32 srcW, u32 maxRow) {
+static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height) {
     PspTexEntry* e;
+    const u8* src = psp_gfx_tex_source(sLoadAddr);
+    u32 srcW = sLoadBlock ? width : (sLoadW << sLoadSiz) >> siz;
+    u32 srcX = (sLoadUls << sLoadSiz) >> siz;
+    u32 srcY = sLoadUlt;
     u32 potW;
     u32 potH;
-    u32 i;
     u32 count;
+    u32 i;
+    u32 x;
+    u32 y;
 
-    if ((addr == 0) || (srcW == 0)) {
+    if (src == NULL || width == 0 || height == 0 || width > 512 || height > 512 || srcW == 0) {
         return NULL;
     }
-
     for (i = 0; i < sTexEntryCount; i++) {
         e = &sTexEntries[i];
-        if ((e->addr == addr) && (e->fmt == fmt) && (e->siz == siz) && (e->srcW == srcW)) {
-            if (maxRow <= e->potH) {
-                return e;
-            }
-            /* Grow in place; the old buffer stays for draws already queued */
-            potH = psp_gfx_next_pow2(maxRow);
-            if (potH > 512) {
-                return NULL;
-            }
-            count = e->potW * potH;
-            if ((sTexPoolUsed + count) > PSP_TEX_POOL_SIZE) {
-                psp_gfx_pool_full();
-                return NULL;
-            }
-            {
-                u16* pixels = &sTexPool[sTexPoolUsed];
-                u32 oldCount = e->potW * e->potH;
-                u32 j;
-
-                sTexPoolUsed += count;
-                for (j = 0; j < oldCount; j++) {
-                    pixels[j] = e->pixels[j];
-                }
-                for (; j < count; j++) {
-                    pixels[j] = 0;
-                }
-                e->pixels = pixels;
-                e->potH = potH;
-            }
+        if (e->addr == sLoadAddr && e->fmt == fmt && e->siz == siz && e->srcW == srcW &&
+            e->width == width && e->height == height && e->srcX == srcX && e->srcY == srcY) {
             return e;
         }
     }
-
-    if (sTexEntryCount >= PSP_TEX_SLOTS) {
-        return NULL;
-    }
-
-    potW = psp_gfx_next_pow2(srcW);
+    potW = psp_gfx_next_pow2(width);
+    potH = psp_gfx_next_pow2(height);
     if (potW < 8) {
         potW = 8;
     }
-    if (potW > 512) {
-        return NULL;
-    }
-    potH = psp_gfx_next_pow2(maxRow);
     if (potH < PSP_TEX_MIN_HEIGHT) {
         potH = PSP_TEX_MIN_HEIGHT;
     }
-    if (potH > 512) {
-        return NULL;
-    }
-
     count = potW * potH;
-    if ((sTexPoolUsed + count) > PSP_TEX_POOL_SIZE) {
-        psp_gfx_pool_full();
+    if (sTexPoolUsed + count > PSP_TEX_POOL_SIZE) {
+        psp_gfx_pool_full(count);
         return NULL;
     }
 
-    e = &sTexEntries[sTexEntryCount];
-    e->addr = addr;
+    if (sTexEntryCount < PSP_TEX_SLOTS) {
+        e = &sTexEntries[sTexEntryCount++];
+    } else {
+        /* Replace the lookup while keeping queued pixels alive */
+        e = &sTexEntries[sTexReplaceNext];
+        sTexReplaceNext = (sTexReplaceNext + 1) % PSP_TEX_SLOTS;
+    }
+    e->addr = sLoadAddr;
     e->fmt = fmt;
     e->siz = siz;
     e->srcW = srcW;
+    e->width = width;
+    e->height = height;
+    e->srcX = srcX;
+    e->srcY = srcY;
     e->potW = potW;
     e->potH = potH;
+    /* Each queued texture starts on a cache line */
     e->pixels = &sTexPool[sTexPoolUsed];
-    for (i = 0; i < count; i++) {
-        e->pixels[i] = 0;
-    }
     sTexPoolUsed += count;
-    sTexEntryCount++;
-
-    return e;
-}
-
-static void psp_gfx_convert(PspTexEntry* e, const u8* src, s32 sx, s32 sy, s32 w, s32 h) {
-    s32 x;
-    s32 y;
-
-    for (y = 0; y < h; y++) {
-        for (x = 0; x < w; x++) {
-            s32 tx = sx + x;
-            s32 ty = sy + y;
-
-            if (tx < 0) {
-                tx += (s32) e->srcW;
-            }
-            if (tx >= (s32) e->srcW) {
-                tx -= (s32) e->srcW;
-            }
-            if ((ty < 0) || (ty >= (s32) e->potH)) {
-                continue;
-            }
-            e->pixels[(u32) ty * e->potW + (u32) tx] = psp_gfx_decode_texel(e, src, tx, ty);
+    for (y = 0; y < potH; y++) {
+        for (x = 0; x < potW; x++) {
+            e->pixels[y * potW + x] = psp_gfx_decode_texel(e, src, x < width ? x : width - 1,
+                                                        y < height ? y : height - 1);
         }
     }
+    return e;
 }
 
 static void psp_gfx_texrect(const Gfx* cur) {
@@ -375,71 +374,49 @@ static void psp_gfx_texrect(const Gfx* cur) {
     u32 w1 = cur->words.w1;
     const Gfx* half1 = cur + 1;
     const Gfx* half2 = cur + 2;
-    u32 sBits;
-    s32 x0;
-    s32 y0;
-    s32 x1;
-    s32 y1;
-    s32 srcX;
-    s32 srcY;
-    s32 w;
-    s32 h;
-    const u8* src;
+    u32 tile = _SHIFTR(w1, 24, 3);
+    u32 cycle = sOtherModeH & (3u << G_MDSFT_CYCLETYPE);
+    s32 x0 = _SHIFTR(w1, 12, 12) >> 2;
+    s32 y0 = _SHIFTR(w1, 0, 12) >> 2;
+    s32 x1 = _SHIFTR(w0, 12, 12) >> 2;
+    s32 y1 = _SHIFTR(w0, 0, 12) >> 2;
+    float u0;
+    float v0;
+    float du;
+    float dv;
     PspTexEntry* e;
-    u32 tile;
-    u32 fmt;
-    u32 siz;
 
     if ((half1->words.w0 >> 24) != G_RDPHALF_1 || (half2->words.w0 >> 24) != G_RDPHALF_2) {
         return;
     }
-
-    sBits = half1->words.w1;
-
-    tile = _SHIFTR(w1, 24, 3);
-    fmt = (sTileFmt[tile] != 0xFF) ? sTileFmt[tile] : sTexFmt;
-    siz = (sTileSiz[tile] != 0xFF) ? sTileSiz[tile] : sTexSiz;
-
-    x1 = (s32) (_SHIFTR(w0, 12, 12) >> 2);
-    y1 = (s32) (_SHIFTR(w0, 0, 12) >> 2);
-    x0 = (s32) (_SHIFTR(w1, 12, 12) >> 2);
-    y0 = (s32) (_SHIFTR(w1, 0, 12) >> 2);
-
-    if ((x1 <= x0) || (y1 <= y0)) {
+    if (cycle == G_CYC_COPY) {
+        x1++;
+        y1++;
+    }
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    if (cycle != G_CYC_COPY && sCombineW0 == 0xFCFFFFFFu && sCombineW1 == 0xFFFDF6FBu) {
+        PspGfx_DrawSolidRect(x0, y0, x1, y1, sPrimColor8888);
         return;
     }
 
-    if (sLoadValid) {
-        srcX = (s32) sLoadUls;
-        srcY = (s32) sLoadUlt;
-    } else {
-        srcX = ((s32) (s16) (sBits >> 16)) >> 5;
-        srcY = ((s32) (s16) (sBits & 0xFFFF)) >> 5;
+    u0 = (float) (s16) (half1->words.w1 >> 16) / 32.0f - (float) sTileUls[tile] / 4.0f;
+    v0 = (float) (s16) half1->words.w1 / 32.0f - (float) sTileUlt[tile] / 4.0f;
+    du = (float) (s16) (half2->words.w1 >> 16) / 1024.0f;
+    dv = (float) (s16) half2->words.w1 / 1024.0f;
+    if (cycle == G_CYC_COPY) {
+        du *= 0.25f;
     }
+    e = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile]);
+    if (e != NULL) {
+        int flip = (w0 >> 24) == G_TEXRECTFLIP;
+        float u1 = u0 + du * (flip ? y1 - y0 : x1 - x0);
+        float v1 = v0 + dv * (flip ? x1 - x0 : y1 - y0);
 
-    w = x1 - x0;
-    h = y1 - y0;
-
-    src = psp_gfx_tex_source(sTexAddr);
-    if (src != NULL) {
-        e = psp_gfx_tex_get(sTexAddr, fmt, siz, sTexW, (u32) (srcY + h));
-        if (e != NULL) {
-            psp_gfx_convert(e, src, srcX, srcY, w, h);
-
-            if (!sLoggedTex) {
-                PspLog("[gfx] tex addr=%08x fmt=%u siz=%u w=%u rect=%d,%d %dx%d src=%d,%d texel=%04x\n",
-                       (unsigned) sTexAddr, (unsigned) fmt, (unsigned) siz, (unsigned) sTexW, (int) x0, (int) y0,
-                       (int) w, (int) h, (int) srcX, (int) srcY, (unsigned) e->pixels[0]);
-                sLoggedTex = 1;
-            }
-
-            PspGfx_DrawTexQuad(x0, y0, x1, y1, e->pixels, (s32) e->potW, (s32) e->potH, srcX, srcY, srcX + w,
-                               srcY + h, sPrimColor, (fmt == G_IM_FMT_RGBA) ? 0 : 1, 1);
-        }
+        PspGfx_DrawTexQuad(x0, y0, x1, y1, e->pixels, e->potW, e->potH, u0, v0, u1, v1,
+                           sPrimColor, cycle != G_CYC_COPY && sTileFmt[tile] != G_IM_FMT_RGBA, 1, flip);
     }
-
-    sTexRectCount++;
-    sLoadValid = 0;
 }
 
 static void psp_gfx_walk(const Gfx* dl) {
@@ -451,8 +428,6 @@ static void psp_gfx_walk(const Gfx* dl) {
         u32 op = w0 >> 24;
 
         sBudget--;
-        sCmdCount++;
-        sOpHist[op]++;
 
         switch (op) {
             case G_ENDDL:
@@ -489,7 +464,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                     if (params & G_MTX_LOAD) {
                         psp_gfx_mat_copy(sProjection, mf);
                     } else {
-                        psp_gfx_mat_mul(sProjection, sProjection, mf);
+                        psp_gfx_mat_mul(sProjection, mf, sProjection);
                     }
                 } else {
                     if ((params & G_MTX_PUSH) && (sModelViewDepth < PSP_GFX_MTX_STACK)) {
@@ -499,9 +474,10 @@ static void psp_gfx_walk(const Gfx* dl) {
                     if (params & G_MTX_LOAD) {
                         psp_gfx_mat_copy(sModelView, mf);
                     } else {
-                        psp_gfx_mat_mul(sModelView, sModelView, mf);
+                        psp_gfx_mat_mul(sModelView, mf, sModelView);
                     }
                 }
+                psp_gfx_mat_mul(sMP, sModelView, sProjection);
                 break;
             }
             case G_POPMTX: {
@@ -511,6 +487,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                     sModelViewDepth--;
                     psp_gfx_mat_copy(sModelView, sModelViewStack[sModelViewDepth]);
                 }
+                psp_gfx_mat_mul(sMP, sModelView, sProjection);
                 break;
             }
             case G_MOVEMEM: {
@@ -529,7 +506,6 @@ static void psp_gfx_walk(const Gfx* dl) {
                 psp_gfx_triangle(_SHIFTR(w1, 17, 7), _SHIFTR(w1, 9, 7), _SHIFTR(w1, 1, 7));
                 break;
             case G_SETTIMG:
-                sTexFmt = _SHIFTR(w0, 21, 3);
                 sTexSiz = _SHIFTR(w0, 19, 2);
                 sTexW = _SHIFTR(w0, 0, 12) + 1;
                 sTexAddr = psp_gfx_ram_addr(w1);
@@ -543,25 +519,34 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTileSiz[tile] = siz;
                 break;
             }
-            case G_LOADBLOCK:
-                if (sTileSiz[G_TX_RENDERTILE] == G_IM_SIZ_4b) {
-                    sLoadUls = _SHIFTR(w0, 12, 12) * 4;
-                    sLoadUlt = _SHIFTR(w0, 0, 12) * 4;
-                } else {
-                    sLoadUls = _SHIFTR(w0, 12, 12);
-                    sLoadUlt = _SHIFTR(w0, 0, 12);
-                }
-                sLoadValid = 1;
+            case G_SETTILESIZE: {
+                u32 tile = _SHIFTR(w1, 24, 3);
+
+                sTileUls[tile] = _SHIFTR(w0, 12, 12);
+                sTileUlt[tile] = _SHIFTR(w0, 0, 12);
+                sTileWidth[tile] = ((_SHIFTR(w1, 12, 12) - sTileUls[tile]) >> 2) + 1;
+                sTileHeight[tile] = ((_SHIFTR(w1, 0, 12) - sTileUlt[tile]) >> 2) + 1;
                 break;
+            }
+            case G_LOADBLOCK:
             case G_LOADTILE:
-                if (sTileSiz[G_TX_RENDERTILE] == G_IM_SIZ_4b) {
-                    sLoadUls = _SHIFTR(w0, 12, 12) >> 1;
-                    sLoadUlt = _SHIFTR(w0, 0, 12) >> 1;
-                } else {
-                    sLoadUls = _SHIFTR(w0, 12, 12) >> 2;
-                    sLoadUlt = _SHIFTR(w0, 0, 12) >> 2;
-                }
-                sLoadValid = 1;
+                sLoadAddr = sTexAddr;
+                sLoadW = sTexW;
+                sLoadSiz = sTexSiz;
+                sLoadBlock = op == G_LOADBLOCK;
+                sLoadUls = _SHIFTR(w0, 12, 12) >> (sLoadBlock ? 0 : 2);
+                sLoadUlt = _SHIFTR(w0, 0, 12) >> (sLoadBlock ? 0 : 2);
+                break;
+            case G_SETOTHERMODE_H: {
+                u32 length = (w0 & 0xFF) + 1;
+                u32 shift = 32 - _SHIFTR(w0, 8, 8) - length;
+                u32 mask = (0xFFFFFFFFu >> (32 - length)) << shift;
+
+                sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+                break;
+            }
+            case G_RDPSETOTHERMODE:
+                sOtherModeH = w0 & 0x00FFFFFFu;
                 break;
             case G_TEXRECT:
             case G_TEXRECTFLIP:
@@ -575,8 +560,17 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 a = w1 & 0xFF;
 
                 sPrimColor = (u16) (((a >> 4) << 12) | ((b >> 4) << 8) | ((g >> 4) << 4) | (r >> 4));
+                sPrimColor8888 = r | (g << 8) | (b << 16) | (a << 24);
                 break;
             }
+            case G_SETCOMBINE:
+                sCombineW0 = w0;
+                sCombineW1 = w1;
+                break;
+            case G_SETSCISSOR:
+                PspGfx_SetScissor((s32) (_SHIFTR(w0, 12, 12) >> 2), (s32) (_SHIFTR(w0, 0, 12) >> 2),
+                                  (s32) (_SHIFTR(w1, 12, 12) >> 2), (s32) (_SHIFTR(w1, 0, 12) >> 2));
+                break;
             case G_SETFILLCOLOR: {
                 u32 texel = (w1 >> 16) & 0xFFFF;
                 u32 r = (texel >> 11) & 0x1F;
@@ -592,8 +586,11 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 uly = _SHIFTR(w1, 2, 10);
                 u32 lrx = _SHIFTR(w0, 14, 10);
                 u32 lry = _SHIFTR(w0, 2, 10);
+                u32 cycle = sOtherModeH & (3u << G_MDSFT_CYCLETYPE);
+                int inclusive = cycle == G_CYC_FILL || cycle == G_CYC_COPY;
 
-                PspGfx_DrawSolidRect((s32) ulx, (s32) uly, (s32) lrx, (s32) lry, sFillColor);
+                PspGfx_DrawSolidRect(ulx, uly, lrx + inclusive, lry + inclusive,
+                                     cycle == G_CYC_FILL ? sFillColor : sPrimColor8888);
                 break;
             }
             default:
@@ -617,6 +614,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         }
         psp_gfx_mat_identity(sModelView);
         psp_gfx_mat_identity(sProjection);
+        psp_gfx_mat_identity(sMP);
         sModelViewDepth = 0;
         sProjectionDepth = 0;
         sViewport.vp.vscale[0] = 240 * 4;
@@ -631,28 +629,12 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
 
     sTexPoolUsed = 0;
     sTexEntryCount = 0;
-    sLoadValid = 0;
-    sCmdCount = 0;
-    sTriCount = 0;
-    sTexRectCount = 0;
+    sTexReplaceNext = 0;
     sBudget = 2000000;
     if (dl != NULL) {
         psp_gfx_walk(dl);
     }
 
-    if ((sDrawCount < 4) || ((sDrawCount % 120) == 0)) {
-        PspLog("[gfx] dl%u cmds=%u tris=%u texrects=%u\n", (unsigned) sDrawCount, (unsigned) sCmdCount,
-               (unsigned) sTriCount, (unsigned) sTexRectCount);
-    }
-    if (sDrawCount == 1) {
-        int i;
-
-        for (i = 0; i < 256; i++) {
-            if (sOpHist[i] != 0) {
-                PspLog("[gfx] op %02x=%u\n", i, (unsigned) sOpHist[i]);
-            }
-        }
-    }
     sDrawCount++;
 }
 

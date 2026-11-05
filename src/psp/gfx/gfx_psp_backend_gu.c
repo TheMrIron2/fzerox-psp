@@ -3,6 +3,7 @@
 #include <pspkernel.h>
 
 #include "src/psp/gfx/gfx_psp.h"
+#include "src/psp/psp.h"
 
 #define GU_LIST_WORDS 0x40000
 #define GU_FB_WIDTH 512
@@ -21,15 +22,21 @@ static u32 sGuList[GU_LIST_WORDS] __attribute__((aligned(64)));
 static int sGuReady;
 static int sDisplayed;
 
-/* RGBA4444 texture + 16-bit position, GU_TRANSFORM_2D layout */
 typedef struct {
-    u16 u;
-    u16 v;
     u16 color;
     s16 x;
     s16 y;
     s16 z;
-} PspGu2DVertex;
+} PspGuSolidVertex;
+
+typedef struct {
+    float u;
+    float v;
+    u16 color;
+    float x;
+    float y;
+    float z;
+} PspGuTexVertex;
 
 static float s2dScaleX;
 static float s2dScaleY;
@@ -54,6 +61,9 @@ static u16 psp_gfx_rgba8888_to_4444(u32 rgba) {
 }
 
 int PspGfx_Init(void) {
+    /* From here on the debug console must not draw over the frame */
+    PspLog_SetScreen(0);
+
     /* Preserve 4:3 with pillarbox on the 480x272 panel */
     s2dScaleX = PSP_SCREEN_H / N64_SCREEN_H;
     s2dScaleY = PSP_SCREEN_H / N64_SCREEN_H;
@@ -114,30 +124,31 @@ void PspGfx_Present(void) {
 }
 
 void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba) {
-    PspGu2DVertex* v;
+    PspGuSolidVertex* v;
     u16 color;
 
     if (!sGuReady) {
         return;
     }
 
-    v = (PspGu2DVertex*) sceGuGetMemory(2 * sizeof(PspGu2DVertex));
+    v = (PspGuSolidVertex*) sceGuGetMemory(2 * sizeof(PspGuSolidVertex));
     if (v == NULL) {
         return;
     }
 
     color = psp_gfx_rgba8888_to_4444(rgba);
     sceGuDisable(GU_TEXTURE_2D);
-    sceGuDisable(GU_BLEND);
+    if (((rgba >> 24) & 0xFF) < 0xFF) {
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    } else {
+        sceGuDisable(GU_BLEND);
+    }
 
-    v[0].u = 0;
-    v[0].v = 0;
     v[0].color = color;
     v[0].x = psp_gfx_map_x((float) x0);
     v[0].y = psp_gfx_map_y((float) y0);
     v[0].z = 0;
-    v[1].u = 0;
-    v[1].v = 0;
     v[1].color = color;
     v[1].x = psp_gfx_map_x((float) x1);
     v[1].y = psp_gfx_map_y((float) y1);
@@ -146,35 +157,27 @@ void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba) {
     sceGuDrawArray(GU_SPRITES, GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, NULL, v);
 }
 
-void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 texW, s32 texH, s32 u0, s32 v0,
-                        s32 u1, s32 v1, u32 tint, int modulate, int blend) {
-    PspGu2DVertex* v;
+void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 texW, s32 texH, float u0, float v0,
+                        float u1, float v1, u32 tint, int modulate, int blend, int flip) {
+    PspGuTexVertex* v;
+    int count = flip ? 4 : 2;
+    int i;
 
-    if (!sGuReady || (pixels == NULL) || (texW <= 0) || (texH <= 0)) {
+    if (!sGuReady || pixels == NULL || texW <= 0 || texH <= 0) {
         return;
     }
-
-    v = (PspGu2DVertex*) sceGuGetMemory(2 * sizeof(PspGu2DVertex));
+    v = (PspGuTexVertex*) sceGuGetMemory(count * sizeof(PspGuTexVertex));
     if (v == NULL) {
         return;
     }
-
     sceGuEnable(GU_TEXTURE_2D);
     sceGuTexMode(GU_PSM_4444, 0, 0, 0);
-    {
-        s32 row0 = (v0 < 0) ? 0 : v0;
-        s32 row1 = (v1 > texH) ? texH : v1;
-
-        if (row1 > row0) {
-            sceKernelDcacheWritebackRange((void*) (pixels + (row0 * texW)), (row1 - row0) * texW * 2);
-        }
-    }
+    sceKernelDcacheWritebackRange((void*) pixels, texW * texH * sizeof(u16));
     sceGuTexImage(0, texW, texH, texW, pixels);
     sceGuTexFlush();
     sceGuTexFunc(modulate ? GU_TFX_MODULATE : GU_TFX_REPLACE, GU_TCC_RGBA);
     sceGuTexFilter(GU_NEAREST, GU_NEAREST);
     sceGuTexWrap(GU_REPEAT, GU_REPEAT);
-    sceGuTexEnvColor(0xFFFFFFFF);
 
     if (blend) {
         sceGuEnable(GU_BLEND);
@@ -182,21 +185,44 @@ void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 t
     } else {
         sceGuDisable(GU_BLEND);
     }
+    for (i = 0; i < count; i++) {
+        int right = flip ? (i & 1) : i;
+        int bottom = flip ? (i >> 1) : i;
 
-    v[0].u = (u16) u0;
-    v[0].v = (u16) v0;
-    v[0].color = (u16) tint;
-    v[0].x = psp_gfx_map_x((float) x0);
-    v[0].y = psp_gfx_map_y((float) y0);
-    v[0].z = 0;
-    v[1].u = (u16) u1;
-    v[1].v = (u16) v1;
-    v[1].color = (u16) tint;
-    v[1].x = psp_gfx_map_x((float) x1);
-    v[1].y = psp_gfx_map_y((float) y1);
-    v[1].z = 0;
+        v[i].u = (flip ? bottom : right) ? u1 : u0;
+        v[i].v = (flip ? right : bottom) ? v1 : v0;
+        v[i].color = (u16) tint;
+        v[i].x = psp_gfx_map_x((float) (right ? x1 : x0));
+        v[i].y = psp_gfx_map_y((float) (bottom ? y1 : y0));
+        v[i].z = 0;
+    }
+    sceGuDrawArray(flip ? GU_TRIANGLE_STRIP : GU_SPRITES,
+                   GU_TEXTURE_32BITF | GU_COLOR_4444 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, count, NULL, v);
+}
 
-    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, NULL, v);
+void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1) {
+    s32 sx0 = psp_gfx_map_x((float) x0);
+    s32 sy0 = psp_gfx_map_y((float) y0);
+    s32 sx1 = psp_gfx_map_x((float) x1);
+    s32 sy1 = psp_gfx_map_y((float) y1);
+
+    if (sx0 < 0) {
+        sx0 = 0;
+    }
+    if (sy0 < 0) {
+        sy0 = 0;
+    }
+    if (sx1 > 480) {
+        sx1 = 480;
+    }
+    if (sy1 > 272) {
+        sy1 = 272;
+    }
+    if (sx1 <= sx0 || sy1 <= sy0) {
+        return;
+    }
+    sceGuEnable(GU_SCISSOR_TEST);
+    sceGuScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
 }
 
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {

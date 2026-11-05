@@ -5,6 +5,12 @@
 #include <stdio.h>
 #include <string.h>
 
+static int sScreenEnabled = 1;
+
+void PspLog_SetScreen(int enable) {
+    sScreenEnabled = enable;
+}
+
 /* Print to the debug screen and append to host0:/fzerox.log (or ms0) */
 void PspLog(const char* fmt, ...) {
     static int first = 1;
@@ -19,7 +25,9 @@ void PspLog(const char* fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, ap);
     va_end(ap);
 
-    pspDebugScreenPrintf("%s", buffer);
+    if (sScreenEnabled) {
+        pspDebugScreenPrintf("%s", buffer);
+    }
     printf("%s", buffer);
     fflush(stdout);
 
