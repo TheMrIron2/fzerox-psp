@@ -20,6 +20,13 @@
 
 #define ALIGN_2(x) (((x) / 2) * 2)
 
+/* Byte-wise so it works on both big- and little-endian hosts */
+#define FZX_IS_MIO0(data)                                  \
+    (((const unsigned char*) (data))[0] == 'M' &&          \
+     ((const unsigned char*) (data))[1] == 'I' &&          \
+     ((const unsigned char*) (data))[2] == 'O' &&          \
+     ((const unsigned char*) (data))[3] == '0')
+
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 

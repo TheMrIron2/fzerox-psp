@@ -876,7 +876,7 @@ void Segment_LoadSegment9(void) {
 #ifdef EXPANSION_KIT
         }
 #endif
-        if (*(s32*) vram == (s32) 'MIO0') {
+        if (FZX_IS_MIO0(vram)) {
             mio0Decode(vram, osPhysicalToVirtual(gSegment22B0A0VramStart));
         }
 #ifdef EXPANSION_KIT
@@ -923,7 +923,7 @@ void Segment_LoadSegment10(void) {
 
     CLEAR_DATA_CACHE(vram, ramSize);
     Dma_LoadAssets(romOffset, vram, ramSize);
-    if (*(s32*) vram == (s32) 'MIO0') {
+    if (FZX_IS_MIO0(vram)) {
         mio0Decode(vram, osPhysicalToVirtual(gSegment235130VramStart));
     }
     D_800CD2EC = false;
@@ -966,7 +966,7 @@ void Segment_LoadSegment10CourseEdit(void) {
 
     CLEAR_DATA_CACHE(vram, ramSize);
     Dma_LoadAssets(romOffset, vram, ramSize);
-    if (*(s32*) vram == (s32) 'MIO0') {
+    if (FZX_IS_MIO0(vram)) {
         mio0Decode(vram, osPhysicalToVirtual(gSegment235130VramStart));
     }
     D_800CD2F0 = -1;
@@ -1001,7 +1001,7 @@ void Segment_LoadSegment5(void) {
 
     CLEAR_DATA_CACHE(vram, ramSize);
     Dma_LoadAssets(romOffset, vram, ramSize);
-    if (*(s32*) vram == (s32) 'MIO0') {
+    if (FZX_IS_MIO0(vram)) {
         mio0Decode(vram, osPhysicalToVirtual(gSegment2738A0VramStart));
     }
     D_800CD2F4 = false;

@@ -6,6 +6,12 @@
 
 u8 gPspN64Ram[0x800000] __attribute__((aligned(64)));
 
+/* Assets are embedded in the ELF, not laid out as N64 segment .data */
+u32 PspSegment_DataSize(const char* name) {
+    (void) name;
+    return 0;
+}
+
 #define SEGALIAS_IMPL(sym, off) \
     __asm__(".globl " #sym "\n.set " #sym ", gPspN64Ram + " #off "\n")
 #define SEGALIAS(sym, off) SEGALIAS_IMPL(sym, off)

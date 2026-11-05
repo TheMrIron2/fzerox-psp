@@ -1,4 +1,5 @@
 #include "src/psp/platform.h"
+#include "src/psp/gfx/gfx_psp.h"
 
 #include <pspctrl.h>
 #include <pspdebug.h>
@@ -134,8 +135,19 @@ void PspPlatform_PollInput(OSContPad* pads) {
 }
 
 void PspPlatform_RunGfxTask(OSTask* task) {
-    (void) task;
+    static int sGfxInit;
+
     sGfxTaskCount++;
+
+    if (task != NULL) {
+        if (!sGfxInit) {
+            PspGfx_Init();
+            sGfxInit = 1;
+        }
+        PspGfx_BeginFrame();
+        PspGfx_RunDisplayList((const Gfx*) task->t.data_ptr, task->t.data_size);
+        PspGfx_Present();
+    }
 
     /* No RSP/RDP runs; report SP and DP completion so scheduling advances */
     if (sEvents[OS_EVENT_SP].mq != NULL) {

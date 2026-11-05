@@ -12,10 +12,17 @@ QueuedTextureLoad gQueuedTextureLoads[16];
 
 void TextureCache_LoadAssetData(s32 segAddr, size_t size, u8* dest) {
     CLEAR_DATA_CACHE(dest, size);
+#ifdef PSP
+    /* Assets are embedded in the ELF, so segAddr is already a host pointer */
+    if (segAddr != 0) {
+        bcopy((const void*) segAddr, dest, size);
+    }
+#else
 #ifndef EXPANSION_KIT
     Dma_LoadAssets(SEGMENT_ROM_START(common_assets_compressed) + SEGMENT_OFFSET(segAddr), dest, size);
 #else
     Dma_LoadAssets(gRomSegmentPairs[4][0] + SEGMENT_OFFSET(segAddr), dest, size);
+#endif
 #endif
 }
 
@@ -82,7 +89,7 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                     header = Arena_Allocate(ALLOC_PEEK, headerSize);
                     CLEAR_DATA_CACHE(header, headerSize);
                     TextureCache_LoadAssetData(texInfo->segAddr, headerSize, header);
-                    if (*(s32*) header == (s32) 'MIO0') {
+                    if (FZX_IS_MIO0(header)) {
                         mio0Decode(header, texture);
                     } else {
                         bzero(texture, (texInfo->height * alignedWidth) / 2);
@@ -100,7 +107,7 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                     header = Arena_Allocate(ALLOC_PEEK, i);
                     CLEAR_DATA_CACHE(header, i);
                     TextureCache_LoadAssetData(texInfo->segAddr, i, header);
-                    if (*(s32*) header == (s32) 'MIO0') {
+                    if (FZX_IS_MIO0(header)) {
                         mio0Decode(header, texture);
                     } else {
                         bzero(texture, texInfo->height * texInfo->width * 2);
@@ -170,7 +177,7 @@ u8* TextureCache_LoadCacheTexInfoListEK(CacheTexInfo* texInfo, bool singleEntry)
                     header = Arena_Allocate(ALLOC_PEEK, i);
                     CLEAR_DATA_CACHE(header, i);
                     bcopy(texInfo->segAddr, header, i);
-                    if (*(s32*) header == (s32) 'MIO0') {
+                    if (FZX_IS_MIO0(header)) {
                         mio0Decode(header, texture);
                     } else {
                         bzero(texture, texInfo->height * texInfo->width * 2);
@@ -245,7 +252,7 @@ void* TextureCache_LoadAndCache(void* segAddr, s32 textureSize, bool forceReload
 
             CLEAR_DATA_CACHE(header, textureSize);
             TextureCache_LoadAssetData(segAddr, textureSize, header);
-            if (*(s32*) header == (s32) 'MIO0') {
+            if (FZX_IS_MIO0(header)) {
                 mio0Decode(header, texture);
             } else {
                 bzero(texture, decodedSize);
@@ -555,7 +562,7 @@ void TextureCache_ProcessLoadQueue(void) {
                     header = Arena_Allocate(ALLOC_PEEK, size);
                     CLEAR_DATA_CACHE(header, size);
                     TextureCache_LoadAssetData(texInfo->segAddr, size, header);
-                    if (*(s32*) header == (s32) 'MIO0') {
+                    if (FZX_IS_MIO0(header)) {
                         mio0Decode(header, load->texture);
                     } else {
                         bzero(load->texture, texInfo->height * texInfo->width * 2);

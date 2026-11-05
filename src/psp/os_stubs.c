@@ -80,17 +80,6 @@ void guNormalize(float* x, float* y, float* z) {
     }
 }
 
-/* Unmatched decomp helpers */
-void mio0Decode(u8* src, void* dst) {
-    (void) src;
-    (void) dst;
-}
-
-s32 func_800AA6BC(u8* data) {
-    (void) data;
-    return 0;
-}
-
 /* Leo disk (US cartridge does not mount the drive) */
 OSPiHandle* osLeoDiskInit(void) {
     return NULL;

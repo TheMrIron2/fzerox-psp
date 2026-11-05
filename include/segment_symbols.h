@@ -49,7 +49,14 @@
 #define SEGMENT_RODATA_END(segment)   (segment ## _RODATA_END)
 #define SEGMENT_DATA_SIZE(segment)  (SEGMENT_RODATA_END(segment) - SEGMENT_DATA_START(segment))
 
+#ifdef PSP
+/* Absolute linker symbols get the PRX load base added, so read the size from
+ * a helper instead of an address-valued symbol. */
+u32 PspSegment_DataSize(const char* name);
+#define SEGMENT_DATA_SIZE_CONST(segment) (PspSegment_DataSize(#segment))
+#else
 #define SEGMENT_DATA_SIZE_CONST(segment) (segment ## _DATA_SIZE)
+#endif
 
 #define SEGMENT_BSS_START(segment) (segment ## _BSS_START)
 #define SEGMENT_BSS_END(segment)   (segment ## _BSS_END)

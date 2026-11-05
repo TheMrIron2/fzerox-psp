@@ -9,8 +9,11 @@ PSP_PLATFORM_C_FILES := \
     src/psp/platform.c \
     src/psp/ultra_reimpl.c \
     src/psp/os_stubs.c \
+    src/psp/mio0.c \
     src/psp/segments.c \
-    src/psp/log.c
+    src/psp/log.c \
+    src/psp/gfx/gfx_psp_dl.c \
+    src/psp/gfx/gfx_psp_backend_gu.c
 
 # Bootstrap EBOOT: platform layer plus the libultra OS self-test.
 PSP_BOOTSTRAP_C_FILES := \
