@@ -30,26 +30,57 @@ static u16 sPixels[512 * 512];
 static s32 sWidth;
 static s32 sHeight;
 static int sFlip;
+static u32 sTint;
+static int sModulate;
+static u16 sNativePalette[256] = { 0xF801 };
+static u16 sCpuFrame[320 * 240];
 
-void PspLog(const char* fmt, ...) { (void) fmt; }
-void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) { (void) v; }
+int PspGfx_Init(void) {
+    return 1;
+}
+void PspGfx_BeginFrame(void) {
+}
+void PspGfx_Present(void) {
+}
+void PspLog(const char* fmt, ...) {
+    (void) fmt;
+}
+void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
+    (void) v;
+}
 void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1) {
-    (void) x0; (void) y0; (void) x1; (void) y1;
+    (void) x0;
+    (void) y0;
+    (void) x1;
+    (void) y1;
 }
 void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 color) {
     sSolids++;
-    sRect[0] = x0; sRect[1] = y0; sRect[2] = x1; sRect[3] = y1;
+    sRect[0] = x0;
+    sRect[1] = y0;
+    sRect[2] = x1;
+    sRect[3] = y1;
     sPixels[0] = color & 0xFFFF;
 }
-void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 width, s32 height,
-                        float u0, float v0, float u1, float v1, u32 tint, int modulate, int blend, int flip) {
+void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 width, s32 height, float u0, float v0,
+                        float u1, float v1, u32 tint, int modulate, int blend, int flip) {
     int i;
 
-    (void) tint; (void) modulate; (void) blend;
+    sTint = tint;
+    sModulate = modulate;
+    (void) blend;
     sQueuedPixels[sTextures++] = pixels;
-    sRect[0] = x0; sRect[1] = y0; sRect[2] = x1; sRect[3] = y1;
-    sUv[0] = u0; sUv[1] = v0; sUv[2] = u1; sUv[3] = v1;
-    sWidth = width; sHeight = height; sFlip = flip;
+    sRect[0] = x0;
+    sRect[1] = y0;
+    sRect[2] = x1;
+    sRect[3] = y1;
+    sUv[0] = u0;
+    sUv[1] = v0;
+    sUv[2] = u1;
+    sUv[3] = v1;
+    sWidth = width;
+    sHeight = height;
+    sFlip = flip;
     for (i = 0; i < width * height; i++) {
         sPixels[i] = pixels[i];
     }
@@ -118,8 +149,7 @@ static void test_tile_and_byte_formats(void) {
         gPspN64Ram[i] = (u8) i;
     }
     gDPSetCycleType(p++, G_CYC_1CYCLE);
-    gDPLoadTextureTile(p++, gPspN64Ram, G_IM_FMT_IA, G_IM_SIZ_8b, 16, 4, 4, 1, 7, 2, 0,
-                       0, 0, 0, 0, 0, 0);
+    gDPLoadTextureTile(p++, gPspN64Ram, G_IM_FMT_IA, G_IM_SIZ_8b, 16, 4, 4, 1, 7, 2, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 4 << 2, 2 << 2, 0, 4 << 5, 1 << 5, 1024, 1024);
     run(p);
     assert(sTextures == 1 && sUv[0] == 0 && sUv[1] == 0);
@@ -148,14 +178,16 @@ static void test_remaining_ia_formats(void) {
     assert(sTextures == 1 && sPixels[0] == 0x5AAA);
 
     p = sCommands;
-    gPspN64Ram[0] = 0xA0; gPspN64Ram[1] = 0x50;
+    gPspN64Ram[0] = 0xA0;
+    gPspN64Ram[1] = 0x50;
     gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_IA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 8 << 2, 8 << 2, 0, 0, 0, 1024, 1024);
     run(p);
     assert(sTextures == 1 && sPixels[0] == 0x5AAA);
 
     p = sCommands;
-    gPspN64Ram[0] = 0xF0; gPspN64Ram[1] = 0x91;
+    gPspN64Ram[0] = 0xF0;
+    gPspN64Ram[1] = 0x91;
     gDPLoadTextureBlock_4b(p++, gPspN64Ram, G_IM_FMT_IA, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 8 << 2, 8 << 2, 0, 0, 0, 1024, 1024);
     run(p);
@@ -163,7 +195,8 @@ static void test_remaining_ia_formats(void) {
 
     p = sCommands;
     gDPLoadTextureTile_4b(p++, gPspN64Ram, G_IM_FMT_I, 16, 4, 4, 1, 7, 2, 0, 0, 0, 0, 0, 0, 0);
-    gPspN64Ram[10] = 0xAB; gPspN64Ram[18] = 0xCD;
+    gPspN64Ram[10] = 0xAB;
+    gPspN64Ram[18] = 0xCD;
     gSPTextureRectangle(p++, 0, 0, 4 << 2, 2 << 2, 0, 4 << 5, 1 << 5, 1024, 1024);
     run(p);
     assert(sTextures == 1 && sUv[0] == 0 && sUv[1] == 0);
@@ -173,7 +206,8 @@ static void test_remaining_ia_formats(void) {
 static void test_loaded_source_and_flip(void) {
     Gfx* p = sCommands;
 
-    gPspN64Ram[0] = 0xF8; gPspN64Ram[1] = 1;
+    gPspN64Ram[0] = 0xF8;
+    gPspN64Ram[1] = 1;
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gDPSetTextureImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 1, sNative);
@@ -209,8 +243,8 @@ static void test_wipe_then_logo(void) {
         int bottom = row + 3 < 224 ? row + 3 : 224;
 
         gDPLoadBlock(p++, G_TX_LOADTILE, 0, row, 296 * 3 - 1, CALC_DXT(296, 2));
-        gSPTextureRectangle(p++, 12 << 2, (row + 8) << 2, 308 << 2, (bottom + 8) << 2,
-                            G_TX_RENDERTILE, 0, 0, 1024, 1024);
+        gSPTextureRectangle(p++, 12 << 2, (row + 8) << 2, 308 << 2, (bottom + 8) << 2, G_TX_RENDERTILE, 0, 0, 1024,
+                            1024);
     }
     gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 32, 32, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 32 << 2, 32 << 2, 0, 0, 0, 1024, 1024);
@@ -223,7 +257,125 @@ static void test_wipe_then_logo(void) {
     assert(sTexPoolUsed * sizeof(u16) < 640 * 1024);
 }
 
+static void test_palette_and_tint(void) {
+    Gfx* p = sCommands;
+    int i;
+
+    for (i = 0; i < 256; i++)
+        sNativePalette[i] = (i & 1) ? 0x07C1 : 0xF801;
+    for (i = 0; i < 64; i++)
+        gPspN64Ram[i] = i & 1;
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetTextureLUT(p++, G_TT_RGBA16);
+    gDPLoadTLUT_pal256(p++, sNativePalette);
+    gDPSetCombineMode(p++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetPrimColor(p++, 0, 0, 128, 255, 0, 255);
+    gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_CI, G_IM_SIZ_8b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sTextures == 1 && sPixels[0] == 0xF00F && sPixels[1] == 0xF0F0);
+    assert(sModulate && sTint == 0xF0F8);
+
+    p = sCommands;
+    gDPLoadTLUT_pal16(p++, 3, sNativePalette);
+    gDPLoadTextureBlock_4b(p++, gPspN64Ram, G_IM_FMT_CI, 8, 8, 3, 0, 0, 0, 0, 0, 0);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sTextures == 1 && sPixels[0] == 0xF00F && sPixels[2] == 0xF00F && sPixels[3] == 0xF0F0);
+}
+
+static void test_rgba_blink_and_background(void) {
+    Gfx* p = sCommands;
+
+    sNative[0] = 0xFFFF;
+    gDPSetTextureLUT(p++, G_TT_NONE);
+    gDPSetCombineMode(p++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
+    gDPSetPrimColor(p++, 0, 0, 255, 0, 0, 255);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sModulate && sTint == 0xF00F);
+    p = sCommands;
+    gDPSetPrimColor(p++, 0, 0, 0, 255, 0, 255);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sModulate && sTint == 0xF0F0);
+    p = sCommands;
+    gDPSetPrimColor(p++, 0, 0, 75, 75, 75, 180);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sModulate && sTint == 0xB444);
+}
+
+static void test_combine_alpha_and_environment(void) {
+    Gfx* p = sCommands;
+
+    sNative[0] = 0xFFFF;
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
+    gDPSetCombineLERP(p++, 0, 0, 0, TEXEL0, 0, 0, 0, PRIMITIVE, 0, 0, 0, TEXEL0, 0, 0, 0, PRIMITIVE);
+    gDPSetPrimColor(p++, 0, 0, 0, 0, 0, 128);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sPixels[0] == 0x8FFF && !sModulate);
+    p = sCommands;
+    gDPSetPrimColor(p++, 0, 0, 0, 0, 0, 255);
+    gDPSetEnvColor(p++, 0, 0, 255, 255);
+    gDPSetCombineLERP(p++, TEXEL0, 0, ENVIRONMENT, 0, 0, 0, 0, TEXEL0, TEXEL0, 0, ENVIRONMENT, 0, 0, 0, 0, TEXEL0);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sPixels[0] == 0xFF00);
+    p = sCommands;
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetPrimColor(p++, 0, 0, 255, 0, 255, 255);
+    gDPSetEnvColor(p++, 128, 255, 255, 255);
+    gDPSetCombineLERP(p++, TEXEL0, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, COMBINED, 0, ENVIRONMENT, 0, COMBINED, 0,
+                      ENVIRONMENT, 0);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sPixels[0] == 0xFF08);
+    p = sCommands;
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    run(p);
+}
+
+static void test_texture_byte_order(void) {
+    Gfx* p = sCommands;
+
+    ((u16*) gPspN64Ram)[0] = 0xF801;
+    PspGfx_SetTextureByteOrder(gPspN64Ram, 128, 1);
+    gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
+    gSPTextureRectangle(p++, 0, 0, 32, 32, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sPixels[0] == 0xF00F);
+    gPspN64Ram[0] = 0x07;
+    gPspN64Ram[1] = 0xC1;
+    PspGfx_SetTextureByteOrder(gPspN64Ram, 128, 0);
+    {
+        u32 count = sTextureOrderCount;
+        int i;
+
+        for (i = 0; i < 1024; i++)
+            PspGfx_SetTextureByteOrder(gPspN64Ram, 128, 0);
+        assert(sTextureOrderCount == count);
+    }
+    run(p);
+    assert(sPixels[0] == 0xF0F0);
+}
+
+static void test_boot_framebuffer(void) {
+    sCpuFrame[70 * 320 + 96] = 0xF801;
+    sTextures = 0;
+    PspGfx_PresentFramebuffer(sCpuFrame);
+    assert(sTextures == 1 && sRect[2] == 320 && sRect[3] == 240);
+    assert(sWidth == 512 && sHeight == 256 && sPixels[70 * 512 + 96] == 0xF00F);
+}
+
 int main(void) {
+    Gfx* p = sCommands;
+
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    run(p);
     test_portrait();
     test_atlas_and_copy();
     test_energy_and_primitive();
@@ -232,6 +384,11 @@ int main(void) {
     test_loaded_source_and_flip();
     test_wipe_then_logo();
     test_wipe_then_logo();
+    test_palette_and_tint();
+    test_rgba_blink_and_background();
+    test_combine_alpha_and_environment();
+    test_texture_byte_order();
+    test_boot_framebuffer();
     puts("PSP HUD display list tests passed");
     return 0;
 }

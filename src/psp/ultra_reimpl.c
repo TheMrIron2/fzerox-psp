@@ -6,6 +6,7 @@
 #include "PR/piint.h"
 #include "src/psp/platform.h"
 #include "src/psp/n64ram.h"
+#include "src/psp/gfx/gfx_psp.h"
 #include "src/psp/psp.h"
 
 #include <pspkernel.h>
@@ -399,7 +400,8 @@ void osWritebackDCache(void* addr, s32 size) {
 }
 
 void osInvalDCache(void* addr, s32 size) {
-    sceKernelDcacheInvalidateRange(addr, size);
+    /* Emulated transfers copy on the CPU so preserve dirty neighboring data */
+    sceKernelDcacheWritebackInvalidateRange(addr, size);
 }
 
 void osInvalICache(void* addr, s32 size) {
@@ -502,11 +504,17 @@ void osViRepeatLine(u8 active) {
 
 void osViBlack(u8 active) {
     sViBlack = active;
+    if (!active && PspGfx_DrawCount() == 0) {
+        PspGfx_PresentFramebuffer(sViCurrentBuffer);
+    }
 }
 
 void osViSwapBuffer(void* frameBufPtr) {
     sViCurrentBuffer = frameBufPtr;
     sViNextBuffer = frameBufPtr;
+    if (!sViBlack && PspGfx_DrawCount() == 0) {
+        PspGfx_PresentFramebuffer(frameBufPtr);
+    }
 }
 
 void* osViGetCurrentFramebuffer(void) {

@@ -1,4 +1,5 @@
 #include "PR/ultratypes.h"
+#include "src/psp/gfx/gfx_psp.h"
 
 /* MIO0 big-endian decoder, matches the original N64 routine */
 static u32 mio0_read_u32(const u8* p) {
@@ -40,6 +41,7 @@ void mio0Decode(u8* src, void* dst) {
         return;
     }
 
+    PspGfx_SetTextureByteOrder(dst, destSize, 0);
     bits = src + 16;
     written = 0;
     bitIndex = 0;

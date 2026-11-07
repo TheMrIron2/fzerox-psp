@@ -3,6 +3,9 @@
 #include "fzx_game.h"
 #include "fzx_object.h"
 #include "segment_symbols.h"
+#ifdef PSP
+#include "src/psp/gfx/gfx_psp.h"
+#endif
 
 TextureCacheEntry gTextureCache[200];
 s32 gTextureCacheCount;
@@ -16,6 +19,7 @@ void TextureCache_LoadAssetData(s32 segAddr, size_t size, u8* dest) {
     /* Assets are embedded in the ELF, so segAddr is already a host pointer */
     if (segAddr != 0) {
         bcopy((const void*) segAddr, dest, size);
+        PspGfx_SetTextureByteOrder(dest, size, PspGfx_TextureByteOrder((const void*) segAddr));
     }
 #else
 #ifndef EXPANSION_KIT
@@ -25,6 +29,27 @@ void TextureCache_LoadAssetData(s32 segAddr, size_t size, u8* dest) {
 #endif
 #endif
 }
+
+#ifdef PSP
+static void TextureCache_MakeNative(CacheTexInfo* info, void* data) {
+    s32 format = info->format & ~TEX_CACHE_MIO0_FLAG;
+    u16* pixels = data;
+    s32 count = info->width * info->height;
+    s32 i;
+
+    if (format != TEX_CACHE_FMT_RGBA16 && format != TEX_CACHE_FMT_RGBA16_TILED) {
+        return;
+    }
+    if (!PspGfx_TextureByteOrder(data)) {
+        for (i = 0; i < count; i++) {
+            u16 pixel = pixels[i];
+
+            pixels[i] = (pixel >> 8) | (pixel << 8);
+        }
+    }
+    PspGfx_SetTextureByteOrder(data, count * sizeof(u16), 1);
+}
+#endif
 
 void TextureCache_ResetCache(void) {
     gTextureCacheCount = 0;
@@ -119,6 +144,9 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                     TextureCache_LoadAssetData(texInfo->segAddr, i, texture);
                     break;
             }
+#ifdef PSP
+            TextureCache_MakeNative(texInfo, texture);
+#endif
             if (!foundFirst) {
                 firstTexture = texture;
                 foundFirst = true;
@@ -189,6 +217,9 @@ u8* TextureCache_LoadCacheTexInfoListEK(CacheTexInfo* texInfo, bool singleEntry)
                     TextureCache_LoadAssetData(texInfo->segAddr, i, texture);
                     break;
             }
+#ifdef PSP
+            TextureCache_MakeNative(texInfo, texture);
+#endif
             if (!foundFirst) {
                 firstTexture = texture;
                 foundFirst = true;
@@ -573,6 +604,9 @@ void TextureCache_ProcessLoadQueue(void) {
                     TextureCache_LoadAssetData(texInfo->segAddr, size * 2, load->texture);
                     break;
             }
+#ifdef PSP
+            TextureCache_MakeNative(texInfo, load->texture);
+#endif
             load->CacheTexInfo = NULL;
             load++;
         } else {

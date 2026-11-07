@@ -1,4 +1,7 @@
 #include "global.h"
+#ifdef PSP
+#include "src/psp/gfx/gfx_psp.h"
+#endif
 #include "fzx_cache.h"
 #include "transition.h"
 #include "fzx_camera.h"
@@ -530,7 +533,11 @@ void Transition_SetBackgroundBuffer(void) {
         var_v0 = D_800DCD00;
     }
 
+#ifdef PSP
+    PspGfx_ReadFramebuffer((u16*) gFrameBuffers[var_v0], SCREEN_WIDTH, SCREEN_HEIGHT);
+#else
     osInvalDCache(gFrameBuffers[var_v0], SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(u16));
+#endif
 
     for (row = 0; row < TRANSITION_BACKGROUND_HEIGHT; row++) {
         frameBufferPtr = &gFrameBuffers[var_v0]->array[row + TRANSITION_BORDER_HEIGHT][TRANSITION_BORDER_WIDTH];
@@ -540,6 +547,10 @@ void Transition_SetBackgroundBuffer(void) {
         }
     }
 
+#ifdef PSP
+    PspGfx_SetTextureByteOrder(transition->backgroundBuffer,
+                              TRANSITION_BACKGROUND_WIDTH * TRANSITION_BACKGROUND_HEIGHT * sizeof(u16), 1);
+#endif
     if (transition->flags & TRANSITION_FLAG_GREYSCALE) {
         TextureUtils_ConvertToGreyscale(transition->backgroundBuffer,
                                         TRANSITION_BACKGROUND_WIDTH * TRANSITION_BACKGROUND_HEIGHT * sizeof(u16));

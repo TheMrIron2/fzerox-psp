@@ -85,6 +85,14 @@ OSPiHandle* osLeoDiskInit(void) {
     return NULL;
 }
 
+int LeoGetAAdr2(u32 ccode, int* dx, int* dy, int* cy) {
+    (void) ccode;
+    (void) dx;
+    (void) dy;
+    (void) cy;
+    return 0;
+}
+
 s32 __osLeoInterrupt(void) {
     return 0;
 }

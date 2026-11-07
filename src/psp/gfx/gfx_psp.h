@@ -29,6 +29,11 @@ void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba);
 /* RGBA4444 texels already converted to PSP byte order, power-of-two size */
 void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 texW, s32 texH, float u0, float v0,
                         float u1, float v1, u32 tint, int modulate, int blend, int flip);
+/* Native colors use the same byte order as the machine */
+void PspGfx_SetTextureByteOrder(const void* data, u32 size, int native);
+int PspGfx_TextureByteOrder(const void* data);
+int PspGfx_ReadFramebuffer(u16* pixels, s32 width, s32 height);
+void PspGfx_PresentFramebuffer(const u16* pixels);
 void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1);
 
 #endif

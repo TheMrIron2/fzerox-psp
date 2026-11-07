@@ -1,5 +1,6 @@
 #include <pspdisplay.h>
 #include <pspgu.h>
+#include <pspge.h>
 #include <pspkernel.h>
 
 #include "src/psp/gfx/gfx_psp.h"
@@ -21,6 +22,8 @@
 static u32 sGuList[GU_LIST_WORDS] __attribute__((aligned(64)));
 static int sGuReady;
 static int sDisplayed;
+static u32 sDrawOffset = GU_DRAW_OFFSET;
+static const volatile u32* sLastFrame;
 
 typedef struct {
     u16 color;
@@ -61,6 +64,9 @@ static u16 psp_gfx_rgba8888_to_4444(u32 rgba) {
 }
 
 int PspGfx_Init(void) {
+    if (sGuReady)
+        return 1;
+
     /* From here on the debug console must not draw over the frame */
     PspLog_SetScreen(0);
 
@@ -115,7 +121,8 @@ void PspGfx_Present(void) {
     sceGuFinish();
     sceGuSync(0, 0);
     sceDisplayWaitVblankStart();
-    sceGuSwapBuffers();
+    sLastFrame = (const volatile u32*) ((u32) sceGeEdramGetAddr() | 0x40000000u | sDrawOffset);
+    sDrawOffset = (u32) sceGuSwapBuffers();
 
     if (!sDisplayed) {
         sceGuDisplay(GU_TRUE);
@@ -247,4 +254,25 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     out[2].y = (v[2].y * s2dScaleY) + s2dOffsetY;
     sceGuDisable(GU_TEXTURE_2D);
     sceGuDrawArray(GU_TRIANGLES, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 3, NULL, out);
+}
+
+int PspGfx_ReadFramebuffer(u16* pixels, s32 width, s32 height) {
+    s32 x, y;
+    const volatile u32* frame = sLastFrame;
+
+    if (frame == NULL || pixels == NULL || width != 320 || height != 240)
+        return 0;
+    for (y = 0; y < height; y++) {
+        s32 sy = psp_gfx_map_y((float) y + 0.5f);
+
+        if (sy >= GU_FB_HEIGHT)
+            sy = GU_FB_HEIGHT - 1;
+        for (x = 0; x < width; x++) {
+            s32 sx = psp_gfx_map_x((float) x + 0.5f);
+            u32 color = frame[sy * GU_FB_WIDTH + sx];
+
+            pixels[y * width + x] = ((color & 0xF8) << 8) | ((color & 0xF800) >> 5) | ((color & 0xF80000) >> 18) | 1;
+        }
+    }
+    return 1;
 }

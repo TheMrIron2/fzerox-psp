@@ -46,6 +46,10 @@ static u32 sTexSiz;
 static u32 sTexW;
 static u32 sTileFmt[8];
 static u32 sTileSiz[8];
+static u32 sTileTmem[8];
+static u32 sTilePalette[8];
+static u16 sPalette[256];
+static u32 sPaletteVersion;
 static u32 sTileWidth[8];
 static u32 sTileHeight[8];
 static u32 sTileUls[8];
@@ -62,6 +66,64 @@ static u32 sPrimColor8888 = 0xFFFFFFFF;
 static u32 sCombineW0;
 static u32 sCombineW1;
 static u32 sFillColor;
+static u32 sEnvColor = 0xFFFFFFFF;
+static u32 sPrimLodFrac;
+
+typedef struct {
+    u32 addr;
+    u32 size;
+    int native;
+} PspTextureOrder;
+
+static PspTextureOrder sTextureOrders[512];
+static u32 sTextureOrderCount;
+
+void PspGfx_SetTextureByteOrder(const void* data, u32 size, int native) {
+    u32 i, index;
+    PspTextureOrder order;
+
+    if (data == NULL || size == 0) {
+        return;
+    }
+    for (index = 0; index < sTextureOrderCount; index++) {
+        if (sTextureOrders[index].addr == (u32) data) {
+            break;
+        }
+    }
+    if (index == sTextureOrderCount && sTextureOrderCount < 512) {
+        sTextureOrderCount++;
+    } else {
+        if (index == sTextureOrderCount) {
+            index = 0;
+        }
+        for (i = index; i + 1 < sTextureOrderCount; i++) {
+            sTextureOrders[i] = sTextureOrders[i + 1];
+        }
+    }
+    order.addr = (u32) data;
+    order.size = size;
+    order.native = native;
+    sTextureOrders[sTextureOrderCount - 1] = order;
+}
+
+int PspGfx_TextureByteOrder(const void* data) {
+    u32 addr = (u32) data;
+    u32 count = sTextureOrderCount;
+    u32 i;
+
+    for (i = 0; i < count; i++) {
+        const PspTextureOrder* order = &sTextureOrders[sTextureOrderCount - i - 1];
+
+        if (addr >= order->addr && addr - order->addr < order->size) {
+            return order->native;
+        }
+    }
+    return addr < (u32) gPspN64Ram || addr >= (u32) gPspN64Ram + 0x800000;
+}
+
+static u16 psp_gfx_read16(const u8* data, u32 index, int native) {
+    return native ? ((const u16*) data)[index] : ((u16) data[index * 2] << 8) | data[index * 2 + 1];
+}
 
 /* Decoded texture cache, rebuilt each display list */
 typedef struct {
@@ -73,6 +135,15 @@ typedef struct {
     u32 height;
     u32 srcX;
     u32 srcY;
+    u32 paletteKey;
+    u32 variant;
+    u32 combine0;
+    u32 combine1;
+    u32 mode;
+    u32 lod;
+    u32 prim;
+    u32 env;
+    int native;
     u32 potW;
     u32 potH;
     u16* pixels;
@@ -231,10 +302,29 @@ static u16 psp_gfx_decode_texel(const PspTexEntry* e, const u8* src, s32 x, s32 
             if (e->siz != G_IM_SIZ_16b) {
                 return 0;
             }
-            if ((u32) src < (u32) gPspN64Ram) {
+            if (e->native) {
                 texel = ((const u16*) src)[idx];
             } else {
                 texel = ((u32) src[idx * 2] << 8) | src[idx * 2 + 1];
+            }
+            return psp_gfx_rgba5551_to_4444(texel);
+        }
+        case G_IM_FMT_CI: {
+            u32 index;
+            u16 texel;
+
+            if (e->siz == G_IM_SIZ_4b) {
+                index = ((idx & 1) ? src[idx >> 1] & 15 : src[idx >> 1] >> 4) + (e->paletteKey & 15) * 16;
+            } else if (e->siz == G_IM_SIZ_8b) {
+                index = src[idx];
+            } else {
+                return 0;
+            }
+            texel = sPalette[index];
+            if ((sOtherModeH & (3u << G_MDSFT_TEXTLUT)) == G_TT_IA16) {
+                u32 i = texel >> 12;
+
+                return ((texel & 0xF0) << 8) | (i << 8) | (i << 4) | i;
             }
             return psp_gfx_rgba5551_to_4444(texel);
         }
@@ -243,7 +333,7 @@ static u16 psp_gfx_decode_texel(const PspTexEntry* e, const u8* src, s32 x, s32 
             u32 a;
 
             if (e->siz == G_IM_SIZ_16b) {
-                if ((u32) src < (u32) gPspN64Ram) {
+                if (e->native) {
                     u16 texel = ((const u16*) src)[idx];
 
                     i = texel >> 12;
@@ -297,18 +387,151 @@ static void psp_gfx_pool_full(u32 requested) {
 
     if (!sLogged) {
         sLogged = 1;
-        PspLog("[gfx] tex pool full bytes=%u requested=%u limit=%u\n",
-               (unsigned) (sTexPoolUsed * sizeof(u16)), (unsigned) (requested * sizeof(u16)),
-               (unsigned) sizeof(sTexPool));
+        PspLog("[gfx] tex pool full bytes=%u requested=%u limit=%u\n", (unsigned) (sTexPoolUsed * sizeof(u16)),
+               (unsigned) (requested * sizeof(u16)), (unsigned) sizeof(sTexPool));
     }
 }
 
-static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height) {
+typedef struct {
+    u32 a, b, c, d;
+    u32 aa, ab, ac, ad;
+} PspCombineCycle;
+
+static PspCombineCycle psp_gfx_combine_cycle(int second) {
+    PspCombineCycle c;
+
+    if (second) {
+        c.a = (sCombineW0 >> 5) & 15;
+        c.b = (sCombineW1 >> 24) & 15;
+        c.c = sCombineW0 & 31;
+        c.d = (sCombineW1 >> 6) & 7;
+        c.aa = (sCombineW1 >> 21) & 7;
+        c.ab = (sCombineW1 >> 3) & 7;
+        c.ac = (sCombineW1 >> 18) & 7;
+        c.ad = sCombineW1 & 7;
+    } else {
+        c.a = (sCombineW0 >> 20) & 15;
+        c.b = (sCombineW1 >> 28) & 15;
+        c.c = (sCombineW0 >> 15) & 31;
+        c.d = (sCombineW1 >> 15) & 7;
+        c.aa = (sCombineW0 >> 12) & 7;
+        c.ab = (sCombineW1 >> 12) & 7;
+        c.ac = (sCombineW0 >> 9) & 7;
+        c.ad = (sCombineW1 >> 9) & 7;
+    }
+    return c;
+}
+
+static int psp_gfx_combine_value(u32 mux, int component, int multiplier, const int tex[4], const int combined[4]) {
+    if (multiplier && mux >= 7) {
+        switch (mux) {
+            case 7:
+                return combined[3];
+            case 8:
+                return tex[3];
+            case 10:
+                return (sPrimColor8888 >> 24) & 255;
+            case 11:
+                return 255;
+            case 12:
+                return (sEnvColor >> 24) & 255;
+            case 14:
+                return sPrimLodFrac;
+            default:
+                return 0;
+        }
+    }
+    switch (mux) {
+        case 0:
+            return combined[component];
+        case 1:
+            return tex[component];
+        case 3:
+            return (sPrimColor8888 >> (component * 8)) & 255;
+        case 4:
+            return 255;
+        case 5:
+            return (sEnvColor >> (component * 8)) & 255;
+        case 6:
+            return multiplier ? 0 : 255;
+        default:
+            return 0;
+    }
+}
+
+static u16 psp_gfx_combine_texel(u16 pixel) {
+    int tex[4];
+    int combined[4] = { 0, 0, 0, 0 };
+    int result[4];
+    int cycles = (sOtherModeH & (3u << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE ? 2 : 1;
+    int i, cycle;
+    u16 out = 0;
+
+    for (i = 0; i < 4; i++) {
+        tex[i] = ((pixel >> (i * 4)) & 15) * 17;
+    }
+    for (cycle = 0; cycle < cycles; cycle++) {
+        PspCombineCycle c = psp_gfx_combine_cycle(cycles == 1 || cycle == 1);
+
+        for (i = 0; i < 4; i++) {
+            int a, b, factor, d;
+
+            if (i == 3) {
+                a = psp_gfx_combine_value(c.aa, 3, 0, tex, combined);
+                b = psp_gfx_combine_value(c.ab, 3, 0, tex, combined);
+                factor = c.ac == 0   ? 0
+                         : c.ac == 6 ? (int) sPrimLodFrac
+                                     : psp_gfx_combine_value(c.ac, 3, 0, tex, combined);
+                d = psp_gfx_combine_value(c.ad, 3, 0, tex, combined);
+            } else {
+                a = psp_gfx_combine_value(c.a, i, 0, tex, combined);
+                b = psp_gfx_combine_value(c.b, i, 0, tex, combined);
+                factor = psp_gfx_combine_value(c.c, i, 1, tex, combined);
+                d = psp_gfx_combine_value(c.d, i, 0, tex, combined);
+            }
+            result[i] = ((a - b) * factor) / 255 + d;
+            if (result[i] < 0)
+                result[i] = 0;
+            if (result[i] > 255)
+                result[i] = 255;
+        }
+        for (i = 0; i < 4; i++)
+            combined[i] = result[i];
+    }
+    for (i = 0; i < 4; i++)
+        out |= (combined[i] >> 4) << (i * 4);
+    return out;
+}
+
+static u32 psp_gfx_texture_style(u32* tint, int* modulate) {
+    PspCombineCycle c = psp_gfx_combine_cycle(1);
+    int rgbTex = (c.a == c.b || c.c == 31) && c.d == G_CCMUX_TEXEL0;
+    int rgbPrim = c.a == G_CCMUX_TEXEL0 && c.b == 15 && c.c == G_CCMUX_PRIMITIVE && c.d == 7;
+    int alphaTex = (c.aa == c.ab || c.ac == 7) && c.ad == G_ACMUX_TEXEL0;
+    int alphaPrim = c.aa == G_ACMUX_TEXEL0 && c.ab == 7 && c.ac == G_ACMUX_PRIMITIVE && c.ad == 7;
+
+    *tint = 0xFFFF;
+    *modulate = 0;
+    if ((sOtherModeH & (3u << G_MDSFT_CYCLETYPE)) == G_CYC_COPY)
+        return 0;
+    if ((sOtherModeH & (3u << G_MDSFT_CYCLETYPE)) != G_CYC_2CYCLE && (rgbTex || rgbPrim) && (alphaTex || alphaPrim)) {
+        *tint = (rgbPrim ? sPrimColor & 0xFFF : 0xFFF) | (alphaPrim ? sPrimColor & 0xF000 : 0xF000);
+        *modulate = rgbPrim || alphaPrim;
+        return 0;
+    }
+    return 1;
+}
+
+static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant) {
     PspTexEntry* e;
     const u8* src = psp_gfx_tex_source(sLoadAddr);
     u32 srcW = sLoadBlock ? width : (sLoadW << sLoadSiz) >> siz;
     u32 srcX = (sLoadUls << sLoadSiz) >> siz;
     u32 srcY = sLoadUlt;
+    u32 paletteKey = fmt == G_IM_FMT_CI
+                         ? (sPaletteVersion << 6) | (((sOtherModeH >> G_MDSFT_TEXTLUT) & 3) << 4) | sTilePalette[tile]
+                         : 0;
+
     u32 potW;
     u32 potH;
     u32 count;
@@ -321,8 +544,11 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height) {
     }
     for (i = 0; i < sTexEntryCount; i++) {
         e = &sTexEntries[i];
-        if (e->addr == sLoadAddr && e->fmt == fmt && e->siz == siz && e->srcW == srcW &&
-            e->width == width && e->height == height && e->srcX == srcX && e->srcY == srcY) {
+        if (e->addr == sLoadAddr && e->fmt == fmt && e->siz == siz && e->srcW == srcW && e->width == width &&
+            e->height == height && e->srcX == srcX && e->srcY == srcY && e->paletteKey == paletteKey &&
+            e->variant == variant &&
+            (!variant || (e->prim == sPrimColor8888 && e->env == sEnvColor && e->combine0 == sCombineW0 &&
+                          e->combine1 == sCombineW1 && e->mode == sOtherModeH && e->lod == sPrimLodFrac))) {
             return e;
         }
     }
@@ -355,6 +581,15 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height) {
     e->height = height;
     e->srcX = srcX;
     e->srcY = srcY;
+    e->native = PspGfx_TextureByteOrder(src);
+    e->paletteKey = paletteKey;
+    e->variant = variant;
+    e->combine0 = sCombineW0;
+    e->combine1 = sCombineW1;
+    e->mode = sOtherModeH;
+    e->lod = sPrimLodFrac;
+    e->prim = sPrimColor8888;
+    e->env = sEnvColor;
     e->potW = potW;
     e->potH = potH;
     /* Each queued texture starts on a cache line */
@@ -362,8 +597,10 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height) {
     sTexPoolUsed += count;
     for (y = 0; y < potH; y++) {
         for (x = 0; x < potW; x++) {
-            e->pixels[y * potW + x] = psp_gfx_decode_texel(e, src, x < width ? x : width - 1,
-                                                        y < height ? y : height - 1);
+            e->pixels[y * potW + x] =
+                psp_gfx_decode_texel(e, src, x < width ? x : width - 1, y < height ? y : height - 1);
+            if (variant)
+                e->pixels[y * potW + x] = psp_gfx_combine_texel(e->pixels[y * potW + x]);
         }
     }
     return e;
@@ -385,6 +622,9 @@ static void psp_gfx_texrect(const Gfx* cur) {
     float du;
     float dv;
     PspTexEntry* e;
+    u32 tint;
+    u32 variant;
+    int modulate;
 
     if ((half1->words.w0 >> 24) != G_RDPHALF_1 || (half2->words.w0 >> 24) != G_RDPHALF_2) {
         return;
@@ -408,14 +648,14 @@ static void psp_gfx_texrect(const Gfx* cur) {
     if (cycle == G_CYC_COPY) {
         du *= 0.25f;
     }
-    e = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile]);
+    variant = psp_gfx_texture_style(&tint, &modulate);
+    e = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile], tile, variant);
     if (e != NULL) {
         int flip = (w0 >> 24) == G_TEXRECTFLIP;
         float u1 = u0 + du * (flip ? y1 - y0 : x1 - x0);
         float v1 = v0 + dv * (flip ? x1 - x0 : y1 - y0);
 
-        PspGfx_DrawTexQuad(x0, y0, x1, y1, e->pixels, e->potW, e->potH, u0, v0, u1, v1,
-                           sPrimColor, cycle != G_CYC_COPY && sTileFmt[tile] != G_IM_FMT_RGBA, 1, flip);
+        PspGfx_DrawTexQuad(x0, y0, x1, y1, e->pixels, e->potW, e->potH, u0, v0, u1, v1, tint, modulate, 1, flip);
     }
 }
 
@@ -433,7 +673,7 @@ static void psp_gfx_walk(const Gfx* dl) {
             case G_ENDDL:
                 return;
             case G_DL: {
-                const Gfx* sub = (const Gfx*)(u32) psp_gfx_ram_addr(w1);
+                const Gfx* sub = (const Gfx*) (u32) psp_gfx_ram_addr(w1);
                 if (sub != NULL && sub != cur) {
                     psp_gfx_walk(sub);
                 }
@@ -442,7 +682,7 @@ static void psp_gfx_walk(const Gfx* dl) {
             case G_VTX: {
                 u32 n = _SHIFTR(w0, 12, 8);
                 u32 v0 = _SHIFTR(w0, 1, 7) - n;
-                const Vtx* src = (const Vtx*)(u32) psp_gfx_ram_addr(w1);
+                const Vtx* src = (const Vtx*) (u32) psp_gfx_ram_addr(w1);
                 u32 i;
 
                 for (i = 0; i < n && (v0 + i) < PSP_GFX_MAX_VTX; i++) {
@@ -454,7 +694,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 params = (w0 & 0xFF) ^ G_MTX_PUSH;
                 float mf[4][4];
 
-                psp_gfx_mtx_l2f(mf, (const Mtx*)(u32) psp_gfx_ram_addr(w1));
+                psp_gfx_mtx_l2f(mf, (const Mtx*) (u32) psp_gfx_ram_addr(w1));
 
                 if (params & G_MTX_PROJECTION) {
                     if ((params & G_MTX_PUSH) && (sProjectionDepth < PSP_GFX_MTX_STACK)) {
@@ -494,7 +734,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 index = _SHIFTR(w0, 0, 8);
 
                 if (index == G_MV_VIEWPORT) {
-                    sViewport = *(const Vp*)(u32) w1;
+                    sViewport = *(const Vp*) (u32) w1;
                 }
                 break;
             }
@@ -517,6 +757,8 @@ static void psp_gfx_walk(const Gfx* dl) {
 
                 sTileFmt[tile] = fmt;
                 sTileSiz[tile] = siz;
+                sTileTmem[tile] = w0 & 511;
+                sTilePalette[tile] = (w1 >> 20) & 15;
                 break;
             }
             case G_SETTILESIZE: {
@@ -528,6 +770,25 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTileHeight[tile] = ((_SHIFTR(w1, 0, 12) - sTileUlt[tile]) >> 2) + 1;
                 break;
             }
+            case G_LOADTLUT: {
+                u32 tile = (w1 >> 24) & 7;
+                u32 first = sTileTmem[tile] >= 256 ? sTileTmem[tile] - 256 : 0;
+                u32 count = ((w1 >> 14) & 1023) + 1;
+                const u8* src = psp_gfx_tex_source(sTexAddr);
+                u32 i;
+
+                if (src != NULL) {
+                    int native = PspGfx_TextureByteOrder(src);
+
+                    for (i = 0; i < count && first + i < 256; i++)
+                        sPalette[first + i] = psp_gfx_read16(src, i, native);
+                    sPaletteVersion++;
+                }
+                break;
+            }
+            case G_SETENVCOLOR:
+                sEnvColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
+                break;
             case G_LOADBLOCK:
             case G_LOADTILE:
                 sLoadAddr = sTexAddr;
@@ -559,6 +820,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 b = (w1 >> 8) & 0xFF;
                 u32 a = w1 & 0xFF;
 
+                sPrimLodFrac = w0 & 255;
                 sPrimColor = (u16) (((a >> 4) << 12) | ((b >> 4) << 8) | ((g >> 4) << 4) | (r >> 4));
                 sPrimColor8888 = r | (g << 8) | (b << 16) | (a << 24);
                 break;
@@ -640,4 +902,19 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
 
 u32 PspGfx_DrawCount(void) {
     return sDrawCount;
+}
+
+void PspGfx_PresentFramebuffer(const u16* pixels) {
+    u32 x, y;
+
+    if (pixels == NULL || !PspGfx_Init())
+        return;
+    for (y = 0; y < 256; y++) {
+        for (x = 0; x < 512; x++) {
+            sTexPool[y * 512 + x] = x < 320 && y < 240 ? psp_gfx_rgba5551_to_4444(pixels[y * 320 + x]) : 0;
+        }
+    }
+    PspGfx_BeginFrame();
+    PspGfx_DrawTexQuad(0, 0, 320, 240, sTexPool, 512, 256, 0, 0, 320, 240, 0xFFFF, 0, 0, 0);
+    PspGfx_Present();
 }
