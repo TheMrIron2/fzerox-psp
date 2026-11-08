@@ -460,7 +460,6 @@ int main(void) {
     test_remaining_ia_formats();
     test_loaded_source_and_flip();
     test_wipe_then_logo();
-    test_wipe_then_logo();
     test_palette_and_tint();
     test_rgba_blink_and_background();
     test_combine_alpha_and_environment();
