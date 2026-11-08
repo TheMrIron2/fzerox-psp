@@ -20,6 +20,12 @@ void PspGfx_BeginFrame(void);
 void PspGfx_RunDisplayList(const Gfx* dl, u32 size);
 void PspGfx_Present(void);
 u32 PspGfx_DrawCount(void);
+/* Marks a presented frame so decoded tiles from older frames can be recycled */
+void PspGfx_EndFrame(void);
+/* Number of texture tiles decoded since boot (0 on a repeated frame = cache hit) */
+u32 PspGfx_TexDecodeCount(void);
+/* Texture pixels were transformed in place; drop any decoded copies */
+void PspGfx_InvalidateTexture(const void* data, u32 size);
 
 /* 3D triangle already transformed to screen space by the interpreter */
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]);

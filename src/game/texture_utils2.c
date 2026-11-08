@@ -1,5 +1,8 @@
 #include "global.h"
 #include "fzx_cache.h"
+#ifdef PSP
+#include "src/psp/gfx/gfx_psp.h"
+#endif
 #include ASSET_HEADER(course_track_gfx.h)
 
 Gfx* TextureUtils_DrawIndexedBlocks(Gfx* gfx, TexturePtr texture, TexturePtr palette, s32 format, s32 unkTmemFlag,
@@ -72,6 +75,7 @@ Gfx* TextureUtils_DrawIndexedBlocks(Gfx* gfx, TexturePtr texture, TexturePtr pal
 }
 
 void Graphics_ConvertToInverseGreyscale(u16* pixel, s32 textureSize) {
+    u16* start = pixel;
     s32 i;
     u32 colorBlend;
     u32 red, green, blue, alpha;
@@ -86,6 +90,9 @@ void Graphics_ConvertToInverseGreyscale(u16* pixel, s32 textureSize) {
 
         *pixel = (colorBlend << 1) + (colorBlend << 6) + (colorBlend << 11) + alpha;
     }
+#ifdef PSP
+    PspGfx_InvalidateTexture(start, textureSize);
+#endif
 }
 
 #ifdef EXPANSION_KIT

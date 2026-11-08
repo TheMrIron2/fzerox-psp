@@ -120,6 +120,8 @@ void PspGfx_Present(void) {
 
     sceGuFinish();
     sceGuSync(0, 0);
+    /* The GU is done with the decoded tiles queued this frame */
+    PspGfx_EndFrame();
     sceDisplayWaitVblankStart();
     sLastFrame = (const volatile u32*) ((u32) sceGeEdramGetAddr() | 0x40000000u | sDrawOffset);
     sDrawOffset = (u32) sceGuSwapBuffers();

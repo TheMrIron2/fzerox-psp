@@ -90,6 +90,12 @@ static void run(Gfx* end) {
     gSPEndDisplayList(end++);
     sTextures = sSolids = 0;
     PspGfx_RunDisplayList(sCommands, (end - sCommands) * sizeof(Gfx));
+    PspGfx_EndFrame();
+}
+
+/* Content written in place must be registered, exactly like the asset loader */
+static void touch(const void* data, u32 size) {
+    PspGfx_SetTextureByteOrder(data, size, PspGfx_TextureByteOrder(data));
 }
 
 static void test_portrait(void) {
@@ -99,6 +105,7 @@ static void test_portrait(void) {
     for (i = 0; i < 32 * 32; i++) {
         sNative[i] = (i & 1) ? 0x07C1 : 0xF801;
     }
+    touch(sNative, sizeof(sNative));
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 32, 32, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 24 << 2, 16 << 2, 48 << 2, 40 << 2, 0, 0, 0, 1365, 1365);
@@ -180,6 +187,7 @@ static void test_remaining_ia_formats(void) {
     p = sCommands;
     gPspN64Ram[0] = 0xA0;
     gPspN64Ram[1] = 0x50;
+    touch(gPspN64Ram, 128);
     gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_IA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 8 << 2, 8 << 2, 0, 0, 0, 1024, 1024);
     run(p);
@@ -188,6 +196,7 @@ static void test_remaining_ia_formats(void) {
     p = sCommands;
     gPspN64Ram[0] = 0xF0;
     gPspN64Ram[1] = 0x91;
+    touch(gPspN64Ram, 128);
     gDPLoadTextureBlock_4b(p++, gPspN64Ram, G_IM_FMT_IA, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gSPTextureRectangle(p++, 0, 0, 8 << 2, 8 << 2, 0, 0, 0, 1024, 1024);
     run(p);
@@ -197,6 +206,7 @@ static void test_remaining_ia_formats(void) {
     gDPLoadTextureTile_4b(p++, gPspN64Ram, G_IM_FMT_I, 16, 4, 4, 1, 7, 2, 0, 0, 0, 0, 0, 0, 0);
     gPspN64Ram[10] = 0xAB;
     gPspN64Ram[18] = 0xCD;
+    touch(gPspN64Ram, 128);
     gSPTextureRectangle(p++, 0, 0, 4 << 2, 2 << 2, 0, 4 << 5, 1 << 5, 1024, 1024);
     run(p);
     assert(sTextures == 1 && sUv[0] == 0 && sUv[1] == 0);
@@ -208,6 +218,7 @@ static void test_loaded_source_and_flip(void) {
 
     gPspN64Ram[0] = 0xF8;
     gPspN64Ram[1] = 1;
+    touch(gPspN64Ram, 128);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPLoadTextureBlock(p++, gPspN64Ram, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
     gDPSetTextureImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 1, sNative);
@@ -233,6 +244,8 @@ static void test_wipe_then_logo(void) {
     for (x = 0; x < 32 * 32; x++) {
         sNative[x] = 0x003F;
     }
+    touch(gPspN64Ram, 296 * 227 * 2);
+    touch(sNative, sizeof(sNative));
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
     gDPSetTextureImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 296, gPspN64Ram);
@@ -254,7 +267,33 @@ static void test_wipe_then_logo(void) {
     assert(sWidth == 32 && sHeight == 32 && sPixels[0] == 0xFF00);
     assert(sQueuedPixels[0][0] == 0xF00F && sQueuedPixels[74][0] == 0xF0F0);
     assert(sQueuedPixels[75] == sQueuedPixels[76]);
-    assert(sTexPoolUsed * sizeof(u16) < 640 * 1024);
+
+    /* Replaying the same frame must come entirely from the decoded tile cache */
+    {
+        u32 before = PspGfx_TexDecodeCount();
+
+        p = sCommands;
+        gDPSetCycleType(p++, G_CYC_1CYCLE);
+        gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+        gDPSetTextureImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 296, gPspN64Ram);
+        gDPSetTile(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 0, 0, G_TX_LOADTILE, 0, 0, 0, 0, 0, 0, 0);
+        gDPSetTile(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 74, 0, G_TX_RENDERTILE, 0, 0, 0, 0, 0, 0, 0);
+        gDPSetTileSize(p++, G_TX_RENDERTILE, 0, 0, 295 << 2, 2 << 2);
+        for (row = 0; row < 224; row += 3) {
+            int bottom = row + 3 < 224 ? row + 3 : 224;
+
+            gDPLoadBlock(p++, G_TX_LOADTILE, 0, row, 296 * 3 - 1, CALC_DXT(296, 2));
+            gSPTextureRectangle(p++, 12 << 2, (row + 8) << 2, 308 << 2, (bottom + 8) << 2, G_TX_RENDERTILE, 0, 0,
+                                1024, 1024);
+        }
+        gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 32, 32, 0, 0, 0, 0, 0, 0, 0);
+        gSPTextureRectangle(p++, 0, 0, 32 << 2, 32 << 2, 0, 0, 0, 1024, 1024);
+        gSPTextureRectangle(p++, 32 << 2, 0, 64 << 2, 32 << 2, 0, 0, 0, 1024, 1024);
+        run(p);
+        assert(sTextures == 77);
+        assert(sPixels[0] == 0xFF00);
+        assert(PspGfx_TexDecodeCount() == before);
+    }
 }
 
 static void test_palette_and_tint(void) {
@@ -365,7 +404,18 @@ static void test_texture_byte_order(void) {
     PspGfx_SetTextureByteOrder(gPspN64Ram, 128, 1);
     PspGfx_SetTextureByteOrder(gPspN64Ram + 16, 16, 0);
     assert(PspGfx_TextureByteOrder(gPspN64Ram + 16) == 0);
-    assert(sTextureOrderCount == 1);
+    {
+        u32 base = (u32) (uintptr_t) gPspN64Ram;
+        u32 overlapping = 0;
+        u32 k;
+
+        for (k = 0; k < sTextureOrderCount; k++) {
+            if (sTextureOrders[k].addr < base + 128 && base < sTextureOrders[k].addr + sTextureOrders[k].size) {
+                overlapping++;
+            }
+        }
+        assert(overlapping == 1);
+    }
 }
 
 static void test_boot_framebuffer(void) {

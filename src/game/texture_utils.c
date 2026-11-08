@@ -1,5 +1,8 @@
 #include "global.h"
 #include "fzx_cache.h"
+#ifdef PSP
+#include "src/psp/gfx/gfx_psp.h"
+#endif
 #include ASSET_HEADER(setup_gfx.h)
 
 Gfx* TextureUtils_DrawRectangleClipped(Gfx* gfx, s32 left, s32 top, s32 right, s32 bottom, s32 red, s32 green, s32 blue,
@@ -39,6 +42,7 @@ Gfx* TextureUtils_DrawRectangleClipped(Gfx* gfx, s32 left, s32 top, s32 right, s
 }
 
 void TextureUtils_ConvertToGreyscale(u16* pixel, s32 size) {
+    u16* start = pixel;
     u32 i;
     u32 colorBlend;
     u32 red, green, blue, alpha;
@@ -53,9 +57,13 @@ void TextureUtils_ConvertToGreyscale(u16* pixel, s32 size) {
 
         *pixel = (colorBlend << 1) + (colorBlend << 6) + (colorBlend << 11) + alpha;
     }
+#ifdef PSP
+    PspGfx_InvalidateTexture(start, size);
+#endif
 }
 
 void TextureUtils_ConvertToTintedGreyscale(u16* pixel, size_t size, s32 redScale, s32 greenScale, s32 blueScale) {
+    u16* start = pixel;
     u32 i;
     u32 colorBlend;
     u32 red, green, blue, alpha;
@@ -71,6 +79,9 @@ void TextureUtils_ConvertToTintedGreyscale(u16* pixel, size_t size, s32 redScale
         *pixel = (((redScale * colorBlend) >> 8) << 11) + (((greenScale * colorBlend) >> 8) << 6) +
                  (((blueScale * colorBlend) >> 8) << 1) + alpha;
     }
+#ifdef PSP
+    PspGfx_InvalidateTexture(start, size);
+#endif
 }
 
 Gfx* TextureUtils_SetupFramebufferView(Gfx* gfx) {

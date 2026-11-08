@@ -5,7 +5,7 @@
 #include "PR/gu.h"
 
 #define PSP_GFX_MAX_VTX 64
-#define PSP_TEX_SLOTS 64
+#define PSP_TEX_SLOTS 512
 #define PSP_TEX_POOL_SIZE (1 << 21) /* 4 MB of RGBA4444 texels */
 #define PSP_TEX_MIN_HEIGHT 8
 
@@ -49,7 +49,8 @@ static u32 sTileSiz[8];
 static u32 sTileTmem[8];
 static u32 sTilePalette[8];
 static u16 sPalette[256];
-static u32 sPaletteVersion;
+/* Content hash of the loaded TLUT so identical reloads still hit the cache */
+static u32 sPaletteHash;
 static u32 sTileWidth[8];
 static u32 sTileHeight[8];
 static u32 sTileUls[8];
@@ -90,6 +91,8 @@ typedef struct {
 static PspTextureOrder sTextureOrders[PSP_TEXTURE_ORDERS];
 static u32 sTextureOrderCount;
 
+static void psp_gfx_tex_invalidate(u32 base, u32 size);
+
 /* Oldest first; a new range purges whatever it overlaps */
 void PspGfx_SetTextureByteOrder(const void* data, u32 size, int native) {
     u32 base = (u32) data;
@@ -126,6 +129,8 @@ void PspGfx_SetTextureByteOrder(const void* data, u32 size, int native) {
     sTextureOrders[sTextureOrderCount].size = size;
     sTextureOrders[sTextureOrderCount].native = native;
     sTextureOrderCount++;
+    /* The buffer was (re)loaded or its byte order changed, so drop decoded copies */
+    psp_gfx_tex_invalidate(base, size);
 }
 
 int PspGfx_TextureByteOrder(const void* data) {
@@ -168,6 +173,7 @@ typedef struct {
     int native;
     u32 potW;
     u32 potH;
+    u32 stamp;
     u16* pixels;
 } PspTexEntry;
 
@@ -176,6 +182,63 @@ static u32 sTexPoolUsed;
 static PspTexEntry sTexEntries[PSP_TEX_SLOTS];
 static u32 sTexEntryCount;
 static u32 sTexReplaceNext;
+/* Decoded tiles survive across frames until the pool needs the space again */
+static u32 sFrameStamp;
+static u32 sTexDecodeCount;
+
+/* Drop decoded tiles whose source was rewritten or reinterpreted */
+static void psp_gfx_tex_invalidate(u32 base, u32 size) {
+    u32 end = base + size;
+    u32 i = 0;
+
+    while (i < sTexEntryCount) {
+        u32 addr = sTexEntries[i].addr;
+
+        if (addr >= base && addr < end) {
+            u32 j;
+
+            for (j = i; j + 1 < sTexEntryCount; j++) {
+                sTexEntries[j] = sTexEntries[j + 1];
+            }
+            sTexEntryCount--;
+        } else {
+            i++;
+        }
+    }
+}
+
+/* Reclaim older tiles and pack the kept pixels down. Only safe between frames,
+ * after the GU has finished, so queued draws never lose their texture */
+static void psp_gfx_tex_compact(u32 keepFrom) {
+    u32 kept = 0;
+    u32 used = 0;
+    u32 i;
+
+    for (i = 0; i < sTexEntryCount; i++) {
+        PspTexEntry entry = sTexEntries[i];
+        u32 count;
+        u32 j;
+
+        if (entry.stamp < keepFrom) {
+            continue;
+        }
+        count = entry.potW * entry.potH;
+        if (used != (u32) (entry.pixels - sTexPool)) {
+            u16* dst = &sTexPool[used];
+            const u16* src = entry.pixels;
+
+            for (j = 0; j < count; j++) {
+                dst[j] = src[j];
+            }
+            entry.pixels = dst;
+        }
+        sTexEntries[kept++] = entry;
+        used += count;
+    }
+    sTexEntryCount = kept;
+    sTexPoolUsed = used;
+    sTexReplaceNext = 0;
+}
 
 static void psp_gfx_mat_identity(float m[4][4]) {
     int i, j;
@@ -555,7 +618,7 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     /* Tiled loads encode T at <<1, so use the render tile's 10.2 ult instead */
     u32 srcY = sLoadBlock ? sLoadUlt : (sTileUlt[tile] >> 2);
     u32 paletteKey = fmt == G_IM_FMT_CI
-                         ? (sPaletteVersion << 6) | (((sOtherModeH >> G_MDSFT_TEXTLUT) & 3) << 4) | sTilePalette[tile]
+                         ? (sPaletteHash << 6) | (((sOtherModeH >> G_MDSFT_TEXTLUT) & 3) << 4) | sTilePalette[tile]
                          : 0;
 
     u32 potW;
@@ -575,6 +638,7 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
             e->variant == variant &&
             (!variant || (e->prim == sPrimColor8888 && e->env == sEnvColor && e->combine0 == sCombineW0 &&
                           e->combine1 == sCombineW1 && e->mode == sOtherModeH && e->lod == sPrimLodFrac))) {
+            e->stamp = sFrameStamp;
             return e;
         }
     }
@@ -595,9 +659,20 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     if (sTexEntryCount < PSP_TEX_SLOTS) {
         e = &sTexEntries[sTexEntryCount++];
     } else {
-        /* Replace the lookup while keeping queued pixels alive */
-        e = &sTexEntries[sTexReplaceNext];
-        sTexReplaceNext = (sTexReplaceNext + 1) % PSP_TEX_SLOTS;
+        u32 victim = sTexReplaceNext;
+        u32 i;
+
+        /* Prefer a tile that is not referenced by the frame being built */
+        for (i = 0; i < PSP_TEX_SLOTS; i++) {
+            u32 index = (sTexReplaceNext + i) % PSP_TEX_SLOTS;
+
+            if (sTexEntries[index].stamp != sFrameStamp) {
+                victim = index;
+                break;
+            }
+        }
+        e = &sTexEntries[victim];
+        sTexReplaceNext = (victim + 1) % PSP_TEX_SLOTS;
     }
     e->addr = sLoadAddr;
     e->fmt = fmt;
@@ -618,6 +693,8 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     e->env = sEnvColor;
     e->potW = potW;
     e->potH = potH;
+    e->stamp = sFrameStamp;
+    sTexDecodeCount++;
     /* Each queued texture starts on a cache line */
     e->pixels = &sTexPool[sTexPoolUsed];
     sTexPoolUsed += count;
@@ -808,10 +885,15 @@ static void psp_gfx_walk(const Gfx* dl) {
 
                 if (src != NULL) {
                     int native = PspGfx_TextureByteOrder(src);
+                    u32 hash = 2166136261u;
 
-                    for (i = 0; i < count && first + i < 256; i++)
+                    for (i = 0; i < count && first + i < 256; i++) {
                         sPalette[first + i] = psp_gfx_read16(src, i, native);
-                    sPaletteVersion++;
+                    }
+                    for (i = 0; i < 256; i++) {
+                        hash = (hash ^ sPalette[i]) * 16777619u;
+                    }
+                    sPaletteHash = hash & 0xFFFFu;
                 }
                 break;
             }
@@ -926,9 +1008,6 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
     }
 
     sColorTarget = 0;
-    sTexPoolUsed = 0;
-    sTexEntryCount = 0;
-    sTexReplaceNext = 0;
     sBudget = 2000000;
     if (dl != NULL) {
         psp_gfx_walk(dl);
@@ -937,9 +1016,32 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
     sDrawCount++;
 }
 
+/* Called once per presented frame, after the GU has finished */
+void PspGfx_EndFrame(void) {
+    sFrameStamp++;
+    /* Reclaim once the pool is half full, keeping this frame's tiles for reuse */
+    if (sTexPoolUsed > PSP_TEX_POOL_SIZE / 2) {
+        psp_gfx_tex_compact(sFrameStamp - 1);
+    }
+}
+
 u32 PspGfx_DrawCount(void) {
     return sDrawCount;
 }
+
+u32 PspGfx_TexDecodeCount(void) {
+    return sTexDecodeCount;
+}
+
+/* Pixel data was rewritten in place (colour transform), so drop decoded copies */
+void PspGfx_InvalidateTexture(const void* data, u32 size) {
+    if (data != NULL && size != 0) {
+        psp_gfx_tex_invalidate((u32) data, size);
+    }
+}
+
+/* Scratch for presenting a CPU framebuffer; kept out of the tile cache */
+static u16 sPresentBuffer[512 * 256] __attribute__((aligned(64)));
 
 void PspGfx_PresentFramebuffer(const u16* pixels) {
     u32 x, y;
@@ -948,10 +1050,10 @@ void PspGfx_PresentFramebuffer(const u16* pixels) {
         return;
     for (y = 0; y < 256; y++) {
         for (x = 0; x < 512; x++) {
-            sTexPool[y * 512 + x] = x < 320 && y < 240 ? psp_gfx_rgba5551_to_4444(pixels[y * 320 + x]) : 0;
+            sPresentBuffer[y * 512 + x] = x < 320 && y < 240 ? psp_gfx_rgba5551_to_4444(pixels[y * 320 + x]) : 0;
         }
     }
     PspGfx_BeginFrame();
-    PspGfx_DrawTexQuad(0, 0, 320, 240, sTexPool, 512, 256, 0, 0, 320, 240, 0xFFFF, 0, 0, 0);
+    PspGfx_DrawTexQuad(0, 0, 320, 240, sPresentBuffer, 512, 256, 0, 0, 320, 240, 0xFFFF, 0, 0, 0);
     PspGfx_Present();
 }
