@@ -73,6 +73,20 @@ void n64psp_directional_light_snorm8_batch(n64psp_vec4f* output, const n64psp_ma
     (void) lightCount;
     (void) count;
 }
+static int sTexgenCalls;
+void n64psp_texgen_snorm8_batch(n64psp_texcoord_s10_5* output, const n64psp_mat4f* modelview,
+                                const void* packed_vertices, n64psp_texgen_mode mode, size_t count) {
+    size_t i;
+
+    (void) modelview;
+    (void) packed_vertices;
+    (void) mode;
+    sTexgenCalls++;
+    for (i = 0; i < count; i++) {
+        output[i].s = 4096;
+        output[i].t = 2048;
+    }
+}
 void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1) {
     (void) x0;
     (void) y0;
@@ -567,6 +581,120 @@ static void test_perspective_y(void) {
     sProjectionSet = 0;
 }
 
+static void test_3d_no_zbuffer(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        vtx[i].v.cn[0] = 0;
+        vtx[i].v.cn[1] = 0;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+    }
+
+    /* Perspective without G_ZBUFFER still belongs on the GE path */
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_SHADE);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+    gDPSetPrimColor(p++, 0, 0, 10, 20, 30, 255);
+    gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3State.depthTest == 0 && sTri3State.depthWrite == 0);
+    assert(sTri3State.blend == 1);
+    /* G_CC_PRIMITIVE shades from the primitive colour, not the vertices */
+    assert(sTri3[0].color == (10u | (20u << 8) | (30u << 16) | 0xFF000000u));
+
+    /* Opaque render mode disables blending */
+    p = sCommands;
+    gDPSetRenderMode(p++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3Count == 3);
+    assert(sTri3State.blend == 0);
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_SHADE);
+    run(p);
+}
+
+static void test_3d_texgen(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        /* Normals drive the generated coordinates */
+        vtx[i].v.cn[0] = 127;
+        vtx[i].v.cn[1] = 0;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+        /* Explicit coordinates must be ignored while generating */
+        vtx[i].v.tc[0] = 999;
+        vtx[i].v.tc[1] = 999;
+    }
+
+    sTexgenCalls = 0;
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
+    gSPNumLights(p++, NUMLIGHTS_1);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_MODULATEIA, G_CC_MODULATEIA);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
+    gSPTexture(p++, 0x2000, 0x2000, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTexgenCalls == 1);
+    /* 16.16 sphere coordinate * scale >> (16 + 5) gives texels */
+    assert(fabsf(sTri3[0].u - 16.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 8.0f) < 0.01f);
+    assert(fabsf(sTri3[2].u - 16.0f) < 0.01f);
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
+    run(p);
+}
+
 static void test_mtx_decode(void) {
     Mtx m;
     float mf[4][4];
@@ -613,6 +741,8 @@ int main(void) {
     test_offscreen_fill();
     test_3d_triangle();
     test_perspective_y();
+    test_3d_no_zbuffer();
+    test_3d_texgen();
     test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");

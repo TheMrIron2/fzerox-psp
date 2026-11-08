@@ -40,6 +40,8 @@ typedef struct {
     s32 texWidth;
     s32 texHeight;
     int modulate;
+    /* 1 = alpha blend source over destination, 0 = opaque */
+    int blend;
 } PspGfxDrawState;
 
 int PspGfx_Init(void);

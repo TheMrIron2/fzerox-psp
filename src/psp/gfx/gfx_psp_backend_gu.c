@@ -388,8 +388,14 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sCullEnabled = 0;
     }
 
-    sceGuDisable(GU_BLEND);
     sceGuDisable(GU_ALPHA_TEST);
+
+    if (state->blend) {
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    } else {
+        sceGuDisable(GU_BLEND);
+    }
 
     if (state->texturePixels != NULL && state->texWidth > 0 && state->texHeight > 0) {
         if (!sTexBoundValid || sTexBoundPixels != state->texturePixels ||

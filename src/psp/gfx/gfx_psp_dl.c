@@ -6,6 +6,7 @@
 
 #include <math.h>
 #include <n64psp/lighting.h>
+#include <n64psp/tnl.h>
 
 #define PSP_GFX_MAX_VTX 64
 #define PSP_TEX_SLOTS 512
@@ -123,6 +124,9 @@ static u32 sOtherModeL;
 static int sProjectionSet;
 static u32 sProjectionSerial;
 static u32 sModelViewSerial;
+/* gSPTexture scale, only used by generated texture coordinates */
+static u32 sTexgenScaleS = 0xFFFF;
+static u32 sTexgenScaleT = 0xFFFF;
 
 /* Projection with the N64 viewport folded in, fed to the GE */
 static float sViewportProjection[4][4] __attribute__((aligned(16)));
@@ -361,7 +365,8 @@ static void psp_gfx_update_viewport_projection(void) {
     float transX = (float) sViewport.vp.vtrans[0];
     float transY = (float) sViewport.vp.vtrans[1];
     float sx = scaleX / (320.0f * 2.0f);
-    float sy = scaleY / (240.0f * 2.0f);
+    /* Perspective needs no extra flip, ortho matrices carry their own y flip */
+    float sy = (sProjectionPerspective ? scaleY : -scaleY) / (240.0f * 2.0f);
     float tx = transX / (320.0f * 2.0f) - 1.0f;
     float ty = 1.0f - transY / (240.0f * 2.0f);
     int i;
@@ -539,6 +544,40 @@ static int psp_gfx_3d_combiner_modulate(void) {
     return !(a == b && d == G_CCMUX_TEXEL0);
 }
 
+/* Colour source for an untextured or shade-modulated 3D triangle */
+enum {
+    PSP_GFX_SHADE_VERTEX = 0,
+    PSP_GFX_SHADE_PRIMITIVE,
+    PSP_GFX_SHADE_ENVIRONMENT,
+};
+
+static int psp_gfx_3d_shade_source(void);
+
+/* Generated coordinates: n64psp gives 16.16 of the [0,0.5] sphere and
+ * gSPTexture scale turns that into S10.5, where 32 units make one texel */
+static n64psp_packed_vertex sTexgenVertices[3];
+
+static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
+    n64psp_texcoord_s10_5 tc[3];
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        const Vtx* v = &sVtx[idx[i]];
+
+        sTexgenVertices[i].attribute[0] = (s8) v->v.cn[0];
+        sTexgenVertices[i].attribute[1] = (s8) v->v.cn[1];
+        sTexgenVertices[i].attribute[2] = (s8) v->v.cn[2];
+    }
+    n64psp_texgen_snorm8_batch(tc, &sLitNormalMatrix, sTexgenVertices,
+                               (sGeometryMode & G_TEXTURE_GEN_LINEAR) ? N64PSP_TEXGEN_LINEAR
+                                                                     : N64PSP_TEXGEN_SPHERICAL,
+                               (size_t) 3);
+    for (i = 0; i < 3; i++) {
+        outU[i] = ((float) tc[i].s / 65536.0f) * (float) sTexgenScaleS / 32.0f - (float) sTileUls[0] / 4.0f;
+        outV[i] = ((float) tc[i].t / 65536.0f) * (float) sTexgenScaleT / 32.0f - (float) sTileUlt[0] / 4.0f;
+    }
+}
+
 static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     PspGfxVertex3D tri[3];
     PspGfxDrawState state;
@@ -547,6 +586,11 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     int textured = 0;
     int modulate = 1;
     int lit = (sGeometryMode & G_LIGHTING) && sNumLights > 0;
+    int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit;
+    int shadeSource;
+    u32 shadeColor = 0;
+    float texgenU[3];
+    float texgenV[3];
     int k;
 
     if (i0 >= PSP_GFX_MAX_VTX || i1 >= PSP_GFX_MAX_VTX || i2 >= PSP_GFX_MAX_VTX) {
@@ -556,8 +600,8 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     idx[1] = i1;
     idx[2] = i2;
 
-    /* Textures use explicit UVs; texgen machines stay untextured for now */
-    if (!(sGeometryMode & G_TEXTURE_GEN) && sTileFmt[0] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
+    /* Generated coordinates come from the vertex normals instead of v.tc */
+    if (sTileFmt[0] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
         if (s3dTexDirty) {
             s3dTexEntry = psp_gfx_tex_get(sTileFmt[0], sTileSiz[0], sTileWidth[0], sTileHeight[0], 0, 0);
             s3dTexDirty = 0;
@@ -595,6 +639,17 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
                                              &sLitAmbient, (size_t) sNumLights, 3);
     }
 
+    if (texgen && textured) {
+        psp_gfx_3d_texgen(idx, texgenU, texgenV);
+    }
+
+    shadeSource = psp_gfx_3d_shade_source();
+    if (shadeSource == PSP_GFX_SHADE_PRIMITIVE) {
+        shadeColor = sPrimColor8888;
+    } else if (shadeSource == PSP_GFX_SHADE_ENVIRONMENT) {
+        shadeColor = sEnvColor;
+    }
+
     for (k = 0; k < 3; k++) {
         const Vtx* v = &sVtx[idx[k]];
         u32 r;
@@ -602,7 +657,12 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
         u32 b;
         u32 a;
 
-        if (lit) {
+        if (shadeSource != PSP_GFX_SHADE_VERTEX) {
+            r = shadeColor & 0xFF;
+            g = (shadeColor >> 8) & 0xFF;
+            b = (shadeColor >> 16) & 0xFF;
+            a = (shadeColor >> 24) & 0xFF;
+        } else if (lit) {
             r = psp_gfx_remap_light(sLitOutput[k].x);
             g = psp_gfx_remap_light(sLitOutput[k].y);
             b = psp_gfx_remap_light(sLitOutput[k].z);
@@ -621,7 +681,10 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
         tri[k].x = (float) v->v.ob[0];
         tri[k].y = (float) v->v.ob[1];
         tri[k].z = (float) v->v.ob[2];
-        if (textured) {
+        if (texgen && textured) {
+            tri[k].u = texgenU[k];
+            tri[k].v = texgenV[k];
+        } else if (textured) {
             tri[k].u = (float) (s16) v->v.tc[0] / 32.0f - (float) sTileUls[0] / 4.0f;
             tri[k].v = (float) (s16) v->v.tc[1] / 32.0f - (float) sTileUlt[0] / 4.0f;
         } else {
@@ -635,14 +698,22 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.modelview = &sModelView[0][0];
     state.projectionSerial = sViewportProjectionSerial;
     state.modelviewSerial = sModelViewSerial;
-    state.depthTest = (sOtherModeL & Z_CMP) != 0;
-    state.depthWrite = (sOtherModeL & Z_UPD) != 0;
+    /* Depth only participates when the RSP is producing z */
+    if (sGeometryMode & G_ZBUFFER) {
+        state.depthTest = (sOtherModeL & Z_CMP) != 0;
+        state.depthWrite = (sOtherModeL & Z_UPD) != 0;
+    } else {
+        state.depthTest = 0;
+        state.depthWrite = 0;
+    }
     state.cullFront = (sGeometryMode & G_CULL_FRONT) != 0;
     state.cullBack = (sGeometryMode & G_CULL_BACK) != 0;
     state.texturePixels = textured ? tex->pixels : NULL;
     state.texWidth = textured ? (s32) tex->potW : 0;
     state.texHeight = textured ? (s32) tex->potH : 0;
     state.modulate = modulate;
+    /* Destination term of 1 (G_BL_1) means the cycle is opaque */
+    state.blend = ((sOtherModeL >> (psp_gfx_3d_final_cycle() ? 16 : 18)) & 3) != G_BL_1;
     PspGfx_DrawTriangles3D(tri, 3, &state);
 }
 
@@ -658,7 +729,7 @@ static void psp_gfx_triangle(u32 i0, u32 i1, u32 i2) {
         PspLog("[gfx] tri geom=%08x proj=%d otherL=%08x zbuf=%d\n", (unsigned) sGeometryMode, sProjectionSet,
                (unsigned) sOtherModeL, (sGeometryMode & G_ZBUFFER) != 0);
     }
-    if ((sGeometryMode & G_ZBUFFER) && sProjectionSet) {
+    if (sProjectionSet && (sProjectionPerspective || (sGeometryMode & G_ZBUFFER))) {
         psp_gfx_triangle3d(i0, i1, i2);
         return;
     }
@@ -819,6 +890,20 @@ static PspCombineCycle psp_gfx_combine_cycle(int second) {
         c.ad = (sCombineW1 >> 9) & 7;
     }
     return c;
+}
+
+static int psp_gfx_3d_shade_source(void) {
+    PspCombineCycle c = psp_gfx_combine_cycle(psp_gfx_3d_final_cycle());
+
+    if (c.a == G_CCMUX_PRIMITIVE || c.b == G_CCMUX_PRIMITIVE || c.c == G_CCMUX_PRIMITIVE ||
+        c.d == G_CCMUX_PRIMITIVE) {
+        return PSP_GFX_SHADE_PRIMITIVE;
+    }
+    if (c.a == G_CCMUX_ENVIRONMENT || c.b == G_CCMUX_ENVIRONMENT || c.c == G_CCMUX_ENVIRONMENT ||
+        c.d == G_CCMUX_ENVIRONMENT) {
+        return PSP_GFX_SHADE_ENVIRONMENT;
+    }
+    return PSP_GFX_SHADE_VERTEX;
 }
 
 static int psp_gfx_combine_value(u32 mux, int component, int multiplier, const int tex[4], const int combined[4]) {
@@ -1338,6 +1423,11 @@ static void psp_gfx_walk(const Gfx* dl) {
                 }
                 break;
             }
+            case G_TEXTURE:
+                /* gSPTexture scale for generated coordinates */
+                sTexgenScaleS = (w1 >> 16) & 0xFFFF;
+                sTexgenScaleT = w1 & 0xFFFF;
+                break;
             case G_MODIFYVTX: {
                 u32 vtx = (w0 & 0xFFFF) >> 1;
                 u32 where = _SHIFTR(w0, 16, 8);
