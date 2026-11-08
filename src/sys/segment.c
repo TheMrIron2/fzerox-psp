@@ -227,6 +227,14 @@ void* Arena_Allocate(s32 allocationType, size_t size) {
 
 uintptr_t Segment_SetPhysicalAddress(s32 segment, uintptr_t addr) {
     gSegments[segment] = K0_TO_PHYS(addr);
+    if (segment == 1) {
+        static int sLoggedSeg1;
+
+        if (!sLoggedSeg1) {
+            sLoggedSeg1 = 1;
+            PspLog("[seg] set1 addr=%08x phys=%08x\n", (unsigned) addr, (unsigned) gSegments[1]);
+        }
+    }
     return gSegments[segment];
 }
 

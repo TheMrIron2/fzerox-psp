@@ -103,6 +103,7 @@ int main(int argc, char* argv[]) {
         pspDebugScreenPrintf("[psp] bootproc returned\n");
 #else
         PspSelfTest_Run();
+        PspSelfTest_Gfx3D();
 #endif
     }
 

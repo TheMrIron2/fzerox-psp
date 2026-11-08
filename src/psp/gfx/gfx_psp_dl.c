@@ -4,6 +4,9 @@
 #include "PR/mbi.h"
 #include "PR/gu.h"
 
+#include <math.h>
+#include <n64psp/lighting.h>
+
 #define PSP_GFX_MAX_VTX 64
 #define PSP_TEX_SLOTS 512
 #define PSP_TEX_POOL_SIZE (1 << 21) /* 4 MB of RGBA4444 texels */
@@ -11,14 +14,55 @@
 
 extern u32 gSegments[16];
 
+extern u8 D_1000000[];
+extern u8 D_2000000[];
+
+#define PSP_GFX_STUB_SIZE 0x40000u
+
 /* Resolve N64 0x0Sxxxxxx segmented addresses; PSP host pointers pass through */
 static u32 psp_gfx_ram_addr(u32 addr) {
     u32 seg;
 
+    /* The PRX loader re-bases the stub arrays, so generated code stores host
+     * addresses in those ranges; map them onto the live segment bases. */
+    if (gSegments[1] != 0 && addr >= (u32) &D_1000000 && (addr - (u32) &D_1000000) < PSP_GFX_STUB_SIZE) {
+        u32 resolved = (u32) gSegments[1] + (addr - (u32) &D_1000000);
+        static u32 sLoggedStub1;
+
+        if (sLoggedStub1 < 4) {
+            sLoggedStub1++;
+            PspLog("[gfx] stub1 addr=%08x base=%08x out=%08x\n", (unsigned) addr, (unsigned) gSegments[1],
+                   (unsigned) resolved);
+        }
+        return resolved;
+    }
+    if (gSegments[2] != 0 && addr >= (u32) &D_2000000 && (addr - (u32) &D_2000000) < PSP_GFX_STUB_SIZE) {
+        return (u32) gSegments[2] + (addr - (u32) &D_2000000);
+    }
+
     if ((addr >= 0x01000000u) && (addr < 0x08000000u)) {
         seg = (addr >> 24) & 0xF;
         if (gSegments[seg] != 0) {
-            return (u32) (gSegments[seg] + (addr & 0x00FFFFFFu));
+            u32 resolved = (u32) (gSegments[seg] + (addr & 0x00FFFFFFu));
+
+            if (seg == 1) {
+                static u32 sLoggedSeg1;
+
+                if (sLoggedSeg1 < 12) {
+                    sLoggedSeg1++;
+                    PspLog("[gfx] ram addr=%08x seg=1 base=%08x out=%08x\n", (unsigned) addr,
+                           (unsigned) gSegments[1], (unsigned) resolved);
+                }
+            }
+            return resolved;
+        }
+        if (seg == 1) {
+            static u32 sLoggedMiss;
+
+            if (sLoggedMiss < 4) {
+                sLoggedMiss++;
+                PspLog("[gfx] ram MISS addr=%08x seg=1 base=0\n", (unsigned) addr);
+            }
         }
     }
     return addr;
@@ -30,13 +74,14 @@ static u32 sBudget;
 #define PSP_GFX_MTX_STACK 16
 
 /* Matrices and vertices */
-static float sModelView[4][4];
-static float sProjection[4][4];
+static float sModelView[4][4] __attribute__((aligned(16)));
+static float sProjection[4][4] __attribute__((aligned(16)));
 static float sMP[4][4];
 static float sModelViewStack[PSP_GFX_MTX_STACK][4][4];
 static float sProjectionStack[PSP_GFX_MTX_STACK][4][4];
 static int sModelViewDepth;
 static int sProjectionDepth;
+static int sProjectionPerspective;
 static Vp sViewport;
 static Vtx sVtx[PSP_GFX_MAX_VTX];
 
@@ -71,6 +116,39 @@ static u32 sEnvColor = 0xFFFFFFFF;
 static u32 sPrimLodFrac;
 /* Current RDP colour image; 0 means the game never bound one (draw to screen) */
 static u32 sColorTarget;
+
+/* RSP 3D state */
+static u32 sGeometryMode;
+static u32 sOtherModeL;
+static int sProjectionSet;
+static u32 sProjectionSerial;
+static u32 sModelViewSerial;
+
+/* Projection with the N64 viewport folded in, fed to the GE */
+static float sViewportProjection[4][4] __attribute__((aligned(16)));
+static u32 sViewportProjectionSerial;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+    u8 r;
+    u8 g;
+    u8 b;
+} PspGfxLightSlot;
+
+static PspGfxLightSlot sLightSlots[8];
+static u8 sAmbientR;
+static u8 sAmbientG;
+static u8 sAmbientB;
+static int sNumLights;
+
+/* Lighting scratch */
+static n64psp_snorm8x4 sLitNormals[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
+static n64psp_vec4f sLitOutput[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
+static n64psp_directional_lightf sLitLights[8] __attribute__((aligned(16)));
+static n64psp_vec4f sLitAmbient __attribute__((aligned(16)));
+static n64psp_mat4f sLitNormalMatrix __attribute__((aligned(16)));
 
 /* The game's visible framebuffers are mapped pointers; offscreen clears such as
  * D_3000170 target raw physical addresses (0x400) that we cannot render to */
@@ -276,19 +354,39 @@ static void psp_gfx_mat_copy(float out[4][4], const float in[4][4]) {
     }
 }
 
-/* N64 s15.16 matrix to float, mirrors guMtxL2F without the libultra dependency */
+/* Fold the N64 quarter-pixel viewport into the projection for the GE */
+static void psp_gfx_update_viewport_projection(void) {
+    float scaleX = (float) sViewport.vp.vscale[0];
+    float scaleY = (float) sViewport.vp.vscale[1];
+    float transX = (float) sViewport.vp.vtrans[0];
+    float transY = (float) sViewport.vp.vtrans[1];
+    float sx = scaleX / (320.0f * 2.0f);
+    float sy = scaleY / (240.0f * 2.0f);
+    float tx = transX / (320.0f * 2.0f) - 1.0f;
+    float ty = 1.0f - transY / (240.0f * 2.0f);
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        sViewportProjection[i][0] = sProjection[i][0] * sx + sProjection[i][3] * tx;
+        sViewportProjection[i][1] = sProjection[i][1] * sy + sProjection[i][3] * ty;
+        sViewportProjection[i][2] = sProjection[i][2];
+        sViewportProjection[i][3] = sProjection[i][3];
+    }
+    if (++sViewportProjectionSerial == 0) {
+        sViewportProjectionSerial = 1;
+    }
+}
+
+/* N64 s15.16 matrix to float. The game stores integer and fraction parts
+ * element-wise in u.i/u.f (see Matrix_FromMtx), so decode the same way. */
 static void psp_gfx_mtx_l2f(float mf[4][4], const Mtx* m) {
-    const u32* ai = (const u32*) &m->m[0][0];
-    const u32* af = (const u32*) &m->m[2][0];
     int i, j;
 
     for (i = 0; i < 4; i++) {
-        for (j = 0; j < 2; j++) {
-            u32 e1 = (*ai & 0xffff0000) | ((*af >> 16) & 0xffff);
-            u32 e2 = ((*(ai++) << 16) & 0xffff0000) | (*(af++) & 0xffff);
+        for (j = 0; j < 4; j++) {
+            s32 fixed = ((s32) (s16) m->u.i[i][j] << 16) | (u32) m->u.f[i][j];
 
-            mf[i][j * 2] = (float) (s32) e1 / 65536.0f;
-            mf[i][j * 2 + 1] = (float) (s32) e2 / 65536.0f;
+            mf[i][j] = (float) fixed / 65536.0f;
         }
     }
 }
@@ -313,6 +411,7 @@ static void psp_gfx_transform(int index, PspGfxVertex* out) {
     float p[4];
     float clip[4];
     float w;
+    float ndcY;
     int i;
 
     if (index < 0 || index >= PSP_GFX_MAX_VTX) {
@@ -340,15 +439,227 @@ static void psp_gfx_transform(int index, PspGfxVertex* out) {
     }
 
     out->x = ((float) sViewport.vp.vscale[0] * (clip[0] / w) + (float) sViewport.vp.vtrans[0]) * 0.25f;
-    out->y = ((float) sViewport.vp.vscale[1] * (clip[1] / w) + (float) sViewport.vp.vtrans[1]) * 0.25f;
+    /* The N64 viewport flips y, ortho matrices already carry their own flip */
+    ndcY = clip[1] / w;
+    if (sProjectionPerspective) {
+        ndcY = -ndcY;
+    }
+    out->y = ((float) sViewport.vp.vscale[1] * ndcY + (float) sViewport.vp.vtrans[1]) * 0.25f;
     out->z = ((float) sViewport.vp.vscale[2] * (clip[2] / w) + (float) sViewport.vp.vtrans[2]) * 0.25f;
     out->color = psp_gfx_vertex_color(v);
 }
 
+static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant);
+
+/* 3D texture cache: refetch when the load/tile state changes */
+static PspTexEntry* s3dTexEntry;
+static int s3dTexDirty = 1;
+
+static u8 psp_gfx_remap_light(float value) {
+    if (value <= 0.0f) {
+        return 0;
+    }
+    if (value >= 255.0f) {
+        return 255;
+    }
+    return (u8) value;
+}
+
+static void psp_gfx_build_light_defs(void) {
+    int i;
+    int j;
+
+    for (i = 0; i < sNumLights && i < 8; i++) {
+        sLitLights[i].direction.x = sLightSlots[i].x;
+        sLitLights[i].direction.y = sLightSlots[i].y;
+        sLitLights[i].direction.z = sLightSlots[i].z;
+        sLitLights[i].direction.w = 0.0f;
+        sLitLights[i].color.x = (float) sLightSlots[i].r;
+        sLitLights[i].color.y = (float) sLightSlots[i].g;
+        sLitLights[i].color.z = (float) sLightSlots[i].b;
+        sLitLights[i].color.w = 0.0f;
+    }
+    sLitAmbient.x = (float) sAmbientR;
+    sLitAmbient.y = (float) sAmbientG;
+    sLitAmbient.z = (float) sAmbientB;
+    sLitAmbient.w = 0.0f;
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            sLitNormalMatrix.m[i][j] = sModelView[i][j];
+        }
+    }
+}
+
+static int psp_gfx_3d_final_cycle(void) {
+    return (sOtherModeH & (3u << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE ? 1 : 0;
+}
+
+static int psp_gfx_3d_combiner_uses_texture(void) {
+    u32 a;
+    u32 b;
+    u32 d;
+    u32 aa;
+    u32 ab;
+    u32 ad;
+
+    if (psp_gfx_3d_final_cycle()) {
+        a = (sCombineW0 >> 5) & 15;
+        b = (sCombineW1 >> 24) & 15;
+        d = (sCombineW1 >> 6) & 7;
+        aa = (sCombineW1 >> 21) & 7;
+        ab = (sCombineW1 >> 3) & 7;
+        ad = sCombineW1 & 7;
+    } else {
+        a = (sCombineW0 >> 20) & 15;
+        b = (sCombineW1 >> 28) & 15;
+        d = (sCombineW1 >> 15) & 7;
+        aa = (sCombineW0 >> 12) & 7;
+        ab = (sCombineW1 >> 12) & 7;
+        ad = (sCombineW0 >> 9) & 7;
+    }
+    return a == G_CCMUX_TEXEL0 || b == G_CCMUX_TEXEL0 || d == G_CCMUX_TEXEL0 ||
+           aa == G_ACMUX_TEXEL0 || ab == G_ACMUX_TEXEL0 || ad == G_ACMUX_TEXEL0;
+}
+
+static int psp_gfx_3d_combiner_modulate(void) {
+    u32 a;
+    u32 b;
+    u32 d;
+
+    if (psp_gfx_3d_final_cycle()) {
+        a = (sCombineW0 >> 5) & 15;
+        b = (sCombineW1 >> 24) & 15;
+        d = (sCombineW1 >> 6) & 7;
+    } else {
+        a = (sCombineW0 >> 20) & 15;
+        b = (sCombineW1 >> 28) & 15;
+        d = (sCombineW1 >> 15) & 7;
+    }
+    /* Pure TEXEL0 output is a replace; anything else modulates the shade */
+    return !(a == b && d == G_CCMUX_TEXEL0);
+}
+
+static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
+    PspGfxVertex3D tri[3];
+    PspGfxDrawState state;
+    u32 idx[3];
+    PspTexEntry* tex = NULL;
+    int textured = 0;
+    int modulate = 1;
+    int lit = (sGeometryMode & G_LIGHTING) && sNumLights > 0;
+    int k;
+
+    if (i0 >= PSP_GFX_MAX_VTX || i1 >= PSP_GFX_MAX_VTX || i2 >= PSP_GFX_MAX_VTX) {
+        return;
+    }
+    idx[0] = i0;
+    idx[1] = i1;
+    idx[2] = i2;
+
+    /* Textures use explicit UVs; texgen machines stay untextured for now */
+    if (!(sGeometryMode & G_TEXTURE_GEN) && sTileFmt[0] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
+        if (s3dTexDirty) {
+            s3dTexEntry = psp_gfx_tex_get(sTileFmt[0], sTileSiz[0], sTileWidth[0], sTileHeight[0], 0, 0);
+            s3dTexDirty = 0;
+        }
+        tex = s3dTexEntry;
+        if (tex != NULL) {
+            textured = 1;
+            modulate = psp_gfx_3d_combiner_modulate();
+        }
+    }
+
+    {
+        static int sLogged3D;
+
+        if (!sLogged3D) {
+            sLogged3D = 1;
+            PspLog("[gfx] 3D active tex=%d p00=%d p11=%d p23=%d seg1=%08x vp=%d,%d,%d,%d zbuf=1\n", textured,
+                   (int) (sViewportProjection[0][0] * 1024.0f), (int) (sViewportProjection[1][1] * 1024.0f),
+                   (int) (sViewportProjection[2][3] * 1024.0f), (unsigned) gSegments[1], sViewport.vp.vscale[0],
+                   sViewport.vp.vscale[1], sViewport.vp.vtrans[0], sViewport.vp.vtrans[1]);
+        }
+    }
+
+    if (lit) {
+        for (k = 0; k < 3; k++) {
+            const Vtx* v = &sVtx[idx[k]];
+
+            sLitNormals[k].x = (s8) v->v.cn[0];
+            sLitNormals[k].y = (s8) v->v.cn[1];
+            sLitNormals[k].z = (s8) v->v.cn[2];
+            sLitNormals[k].w = 0;
+        }
+        psp_gfx_build_light_defs();
+        n64psp_directional_light_snorm8_batch(sLitOutput, &sLitNormalMatrix, sLitNormals, sLitLights,
+                                             &sLitAmbient, (size_t) sNumLights, 3);
+    }
+
+    for (k = 0; k < 3; k++) {
+        const Vtx* v = &sVtx[idx[k]];
+        u32 r;
+        u32 g;
+        u32 b;
+        u32 a;
+
+        if (lit) {
+            r = psp_gfx_remap_light(sLitOutput[k].x);
+            g = psp_gfx_remap_light(sLitOutput[k].y);
+            b = psp_gfx_remap_light(sLitOutput[k].z);
+            a = v->v.cn[3];
+            if (a == 0) {
+                a = 255;
+            }
+        } else {
+            u32 c = psp_gfx_vertex_color(v);
+
+            r = c & 0xFF;
+            g = (c >> 8) & 0xFF;
+            b = (c >> 16) & 0xFF;
+            a = (c >> 24) & 0xFF;
+        }
+        tri[k].x = (float) v->v.ob[0];
+        tri[k].y = (float) v->v.ob[1];
+        tri[k].z = (float) v->v.ob[2];
+        if (textured) {
+            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f - (float) sTileUls[0] / 4.0f;
+            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f - (float) sTileUlt[0] / 4.0f;
+        } else {
+            tri[k].u = 0.0f;
+            tri[k].v = 0.0f;
+        }
+        tri[k].color = r | (g << 8) | (b << 16) | (a << 24);
+    }
+
+    state.projection = &sViewportProjection[0][0];
+    state.modelview = &sModelView[0][0];
+    state.projectionSerial = sViewportProjectionSerial;
+    state.modelviewSerial = sModelViewSerial;
+    state.depthTest = (sOtherModeL & Z_CMP) != 0;
+    state.depthWrite = (sOtherModeL & Z_UPD) != 0;
+    state.cullFront = (sGeometryMode & G_CULL_FRONT) != 0;
+    state.cullBack = (sGeometryMode & G_CULL_BACK) != 0;
+    state.texturePixels = textured ? tex->pixels : NULL;
+    state.texWidth = textured ? (s32) tex->potW : 0;
+    state.texHeight = textured ? (s32) tex->potH : 0;
+    state.modulate = modulate;
+    PspGfx_DrawTriangles3D(tri, 3, &state);
+}
+
 static void psp_gfx_triangle(u32 i0, u32 i1, u32 i2) {
     PspGfxVertex tri[3];
+    static int sLoggedPath;
 
     if (sColorTarget != 0 && !psp_gfx_targets_display()) {
+        return;
+    }
+    if (!sLoggedPath) {
+        sLoggedPath = 1;
+        PspLog("[gfx] tri geom=%08x proj=%d otherL=%08x zbuf=%d\n", (unsigned) sGeometryMode, sProjectionSet,
+               (unsigned) sOtherModeL, (sGeometryMode & G_ZBUFFER) != 0);
+    }
+    if ((sGeometryMode & G_ZBUFFER) && sProjectionSet) {
+        psp_gfx_triangle3d(i0, i1, i2);
         return;
     }
     psp_gfx_transform(i0, &tri[0]);
@@ -803,6 +1114,13 @@ static void psp_gfx_walk(const Gfx* dl) {
                 psp_gfx_mtx_l2f(mf, (const Mtx*) (u32) psp_gfx_ram_addr(w1));
 
                 if (params & G_MTX_PROJECTION) {
+                    static int sLoggedProj;
+
+                    if (sLoggedProj < 6) {
+                        sLoggedProj++;
+                        PspLog("[gfx] proj w1=%08x seg1=%08x m00=%d\n", (unsigned) w1, (unsigned) gSegments[1],
+                               (int) (mf[0][0] * 1024.0f));
+                    }
                     if ((params & G_MTX_PUSH) && (sProjectionDepth < PSP_GFX_MTX_STACK)) {
                         psp_gfx_mat_copy(sProjectionStack[sProjectionDepth], sProjection);
                         sProjectionDepth++;
@@ -812,6 +1130,13 @@ static void psp_gfx_walk(const Gfx* dl) {
                     } else {
                         psp_gfx_mat_mul(sProjection, mf, sProjection);
                     }
+                    sProjectionSet = 1;
+                    /* Frustum and combined view matrices keep -1 in the w column */
+                    sProjectionPerspective = sProjection[2][3] != 0.0f;
+                    if (++sProjectionSerial == 0) {
+                        sProjectionSerial = 1;
+                    }
+                    psp_gfx_update_viewport_projection();
                 } else {
                     if ((params & G_MTX_PUSH) && (sModelViewDepth < PSP_GFX_MTX_STACK)) {
                         psp_gfx_mat_copy(sModelViewStack[sModelViewDepth], sModelView);
@@ -821,6 +1146,9 @@ static void psp_gfx_walk(const Gfx* dl) {
                         psp_gfx_mat_copy(sModelView, mf);
                     } else {
                         psp_gfx_mat_mul(sModelView, mf, sModelView);
+                    }
+                    if (++sModelViewSerial == 0) {
+                        sModelViewSerial = 1;
                     }
                 }
                 psp_gfx_mat_mul(sMP, sModelView, sProjection);
@@ -834,13 +1162,55 @@ static void psp_gfx_walk(const Gfx* dl) {
                     psp_gfx_mat_copy(sModelView, sModelViewStack[sModelViewDepth]);
                 }
                 psp_gfx_mat_mul(sMP, sModelView, sProjection);
+                if (++sModelViewSerial == 0) {
+                    sModelViewSerial = 1;
+                }
                 break;
             }
             case G_MOVEMEM: {
                 u32 index = _SHIFTR(w0, 0, 8);
 
                 if (index == G_MV_VIEWPORT) {
-                    sViewport = *(const Vp*) (u32) w1;
+                    const Vp* vp = (const Vp*) (u32) psp_gfx_ram_addr(w1);
+
+                    if (vp != NULL) {
+                        sViewport = *vp;
+                        psp_gfx_update_viewport_projection();
+                    }
+                } else if (index == G_MV_LIGHT) {
+                    u32 ofs = _SHIFTR(w0, 8, 8) * 8;
+                    const Light* light = (const Light*) (u32) psp_gfx_ram_addr(w1);
+
+                    /* L0 starts at offset 48; lookat entries are below it */
+                    if (light != NULL && ofs >= 48) {
+                        u32 n = ofs / 24 - 1;
+
+                        if (n >= 1 && n <= 8) {
+                            PspGfxLightSlot* slot = &sLightSlots[n - 1];
+                            float x = (float) (s8) light->l.dir[0];
+                            float y = (float) (s8) light->l.dir[1];
+                            float z = (float) (s8) light->l.dir[2];
+                            float len2 = (x * x) + (y * y) + (z * z);
+
+                            if (len2 > 0.000001f) {
+                                float inverseLength = 1.0f / sqrtf(len2);
+
+                                x *= inverseLength;
+                                y *= inverseLength;
+                                z *= inverseLength;
+                            } else {
+                                x = 0.0f;
+                                y = 0.0f;
+                                z = 0.0f;
+                            }
+                            slot->x = x;
+                            slot->y = y;
+                            slot->z = z;
+                            slot->r = light->l.col[0];
+                            slot->g = light->l.col[1];
+                            slot->b = light->l.col[2];
+                        }
+                    }
                 }
                 break;
             }
@@ -855,6 +1225,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTexSiz = _SHIFTR(w0, 19, 2);
                 sTexW = _SHIFTR(w0, 0, 12) + 1;
                 sTexAddr = psp_gfx_ram_addr(w1);
+                s3dTexDirty = 1;
                 break;
             case G_SETTILE: {
                 u32 fmt = _SHIFTR(w0, 21, 3);
@@ -865,6 +1236,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTileSiz[tile] = siz;
                 sTileTmem[tile] = w0 & 511;
                 sTilePalette[tile] = (w1 >> 20) & 15;
+                s3dTexDirty = 1;
                 break;
             }
             case G_SETTILESIZE: {
@@ -874,6 +1246,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTileUlt[tile] = _SHIFTR(w0, 0, 12);
                 sTileWidth[tile] = ((_SHIFTR(w1, 12, 12) - sTileUls[tile]) >> 2) + 1;
                 sTileHeight[tile] = ((_SHIFTR(w1, 0, 12) - sTileUlt[tile]) >> 2) + 1;
+                s3dTexDirty = 1;
                 break;
             }
             case G_LOADTLUT: {
@@ -895,6 +1268,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                     }
                     sPaletteHash = hash & 0xFFFFu;
                 }
+                s3dTexDirty = 1;
                 break;
             }
             case G_SETCIMG:
@@ -911,6 +1285,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sLoadBlock = op == G_LOADBLOCK;
                 sLoadUls = _SHIFTR(w0, 12, 12) >> (sLoadBlock ? 0 : 2);
                 sLoadUlt = _SHIFTR(w0, 0, 12) >> (sLoadBlock ? 0 : 2);
+                s3dTexDirty = 1;
                 break;
             case G_SETOTHERMODE_H: {
                 u32 length = (w0 & 0xFF) + 1;
@@ -918,6 +1293,59 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 mask = (0xFFFFFFFFu >> (32 - length)) << shift;
 
                 sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+                break;
+            }
+            case G_SETOTHERMODE_L: {
+                u32 length = (w0 & 0xFF) + 1;
+                u32 shift = 32 - _SHIFTR(w0, 8, 8) - length;
+                u32 mask = (0xFFFFFFFFu >> (32 - length)) << shift;
+
+                sOtherModeL = (sOtherModeL & ~mask) | (w1 & mask);
+                break;
+            }
+            case G_GEOMETRYMODE:
+                sGeometryMode = (sGeometryMode & (w0 & 0x00FFFFFFu)) | w1;
+                break;
+            case G_MOVEWORD: {
+                u32 index = _SHIFTR(w0, 16, 8);
+                u32 offset = w0 & 0xFFFF;
+
+                if (index == G_MW_NUMLIGHT) {
+                    sNumLights = (s32) (w1 / 24);
+                    if (sNumLights > 7) {
+                        sNumLights = 7;
+                    }
+                    /* The highest slot holds the ambient light */
+                    if (sNumLights >= 0) {
+                        sAmbientR = sLightSlots[sNumLights].r;
+                        sAmbientG = sLightSlots[sNumLights].g;
+                        sAmbientB = sLightSlots[sNumLights].b;
+                    }
+                } else if (index == G_MW_LIGHTCOL) {
+                    u32 slot = offset / 0x18;
+
+                    if (slot < 8) {
+                        sLightSlots[slot].r = (w1 >> 24) & 0xFF;
+                        sLightSlots[slot].g = (w1 >> 16) & 0xFF;
+                        sLightSlots[slot].b = (w1 >> 8) & 0xFF;
+                    }
+                } else if (index == G_MW_SEGMENT) {
+                    u32 segment = offset / 4;
+
+                    if (segment < 16) {
+                        gSegments[segment] = w1;
+                    }
+                }
+                break;
+            }
+            case G_MODIFYVTX: {
+                u32 vtx = (w0 & 0xFFFF) >> 1;
+                u32 where = _SHIFTR(w0, 16, 8);
+
+                if (vtx < PSP_GFX_MAX_VTX && where == G_MWO_POINT_ST) {
+                    sVtx[vtx].v.tc[0] = (w1 >> 16) & 0xFFFF;
+                    sVtx[vtx].v.tc[1] = w1 & 0xFFFF;
+                }
                 break;
             }
             case G_RDPSETOTHERMODE:
@@ -995,6 +1423,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         psp_gfx_mat_identity(sModelView);
         psp_gfx_mat_identity(sProjection);
         psp_gfx_mat_identity(sMP);
+        sProjectionPerspective = 0;
         sModelViewDepth = 0;
         sProjectionDepth = 0;
         sViewport.vp.vscale[0] = 240 * 4;
@@ -1005,6 +1434,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         sViewport.vp.vtrans[1] = 136 * 4;
         sViewport.vp.vtrans[2] = 0;
         sViewport.vp.vtrans[3] = 0;
+        psp_gfx_update_viewport_projection();
     }
 
     sColorTarget = 0;
@@ -1019,6 +1449,8 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
 /* Called once per presented frame, after the GU has finished */
 void PspGfx_EndFrame(void) {
     sFrameStamp++;
+    /* Pool compaction may move tile pixels between frames */
+    s3dTexDirty = 1;
     /* Reclaim once the pool is half full, keeping this frame's tiles for reuse */
     if (sTexPoolUsed > PSP_TEX_POOL_SIZE / 2) {
         psp_gfx_tex_compact(sFrameStamp - 1);

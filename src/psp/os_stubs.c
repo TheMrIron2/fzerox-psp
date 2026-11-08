@@ -8,6 +8,9 @@
 #include "PR/ucode.h"
 
 /* Data blobs referenced by generated code but not yet extracted natively */
+/* The gfx pool is written through gGfxPool and referenced by generated code
+ * as D_1000000 (segment 1). Keep these as real arrays; the interpreter maps
+ * their address ranges onto the live segment bases (see psp_gfx_ram_addr). */
 u8 D_1000000[0x40000];
 u8 D_2000000[0x40000];
 u8 D_20284C0[0x100];

@@ -15,6 +15,33 @@ typedef struct {
     float z;
 } PspGfxVertex;
 
+/* 3D vertex in native GE order: u, v, color, object-space x, y, z */
+typedef struct {
+    float u;
+    float v;
+    u32 color;
+    float x;
+    float y;
+    float z;
+} PspGfxVertex3D;
+
+/* Matrices use the n64psp mat4f layout, which already matches GU column-major */
+typedef struct {
+    const float* projection;
+    const float* modelview;
+    u32 projectionSerial;
+    u32 modelviewSerial;
+    int depthTest;
+    int depthWrite;
+    int cullFront;
+    int cullBack;
+    /* Decoded RGBA4444 tile, power-of-two size; NULL means untextured */
+    const u16* texturePixels;
+    s32 texWidth;
+    s32 texHeight;
+    int modulate;
+} PspGfxDrawState;
+
 int PspGfx_Init(void);
 void PspGfx_BeginFrame(void);
 void PspGfx_RunDisplayList(const Gfx* dl, u32 size);
@@ -29,6 +56,9 @@ void PspGfx_InvalidateTexture(const void* data, u32 size);
 
 /* 3D triangle already transformed to screen space by the interpreter */
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]);
+
+/* 3D triangle already in object space; the GE applies modelview and projection */
+void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state);
 
 /* 2D helpers, N64 screen pixels */
 void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba);

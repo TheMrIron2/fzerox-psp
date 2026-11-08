@@ -5,7 +5,7 @@
 #define _ULTRATYPES_H_
 #include "src/psp/gfx/gfx_psp_backend_gu.c"
 
-static u32 sTestFrame[512 * 272];
+static u16 sTestFrame[512 * 272];
 static u16 sReadback[320 * 240];
 
 int main(void) {
@@ -16,7 +16,7 @@ int main(void) {
     s2dOffsetX = (480.0f - 320.0f * s2dScaleX) * 0.5f;
     for (y = 0; y < 272; y++) {
         for (x = 0; x < 512; x++) {
-            sTestFrame[y * 512 + x] = x < 240 ? 0xFF0000FF : 0xFF00FF00;
+            sTestFrame[y * 512 + x] = x < 240 ? 0x001F : 0x07E0;
         }
     }
     sLastFrame = sTestFrame;
@@ -28,7 +28,7 @@ int main(void) {
     assert(sReadback[239 * 320] == 0xF801);
     assert(sReadback[240 * 320 - 1] == 0x07C1);
     for (y = 0; y < 512 * 272; y++)
-        sTestFrame[y] = 0xFFFF0000;
+        sTestFrame[y] = 0xF800;
     assert(PspGfx_ReadFramebuffer(sReadback, 320, 240));
     assert(sReadback[0] == 0x003F);
     puts("PSP GU framebuffer conversion tests passed");

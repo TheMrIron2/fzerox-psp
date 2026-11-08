@@ -19,6 +19,8 @@ typedef double f64;
 
 u32 gSegments[16];
 u8 gPspN64Ram[0x40000];
+u8 D_1000000[0x40000];
+u8 D_2000000[0x40000];
 static u16 sNative[32 * 32] = { 0xF801 };
 static Gfx sCommands[2048];
 static const u16* sQueuedPixels[2048];
@@ -34,6 +36,9 @@ static u32 sTint;
 static int sModulate;
 static u16 sNativePalette[256] = { 0xF801 };
 static u16 sCpuFrame[320 * 240];
+static PspGfxVertex3D sTri3[3];
+static PspGfxDrawState sTri3State;
+static u32 sTri3Count;
 
 int PspGfx_Init(void) {
     return 1;
@@ -47,6 +52,26 @@ void PspLog(const char* fmt, ...) {
 }
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     (void) v;
+}
+void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
+    sTri3Count = count;
+    if (count >= 3) {
+        sTri3[0] = vertices[0];
+        sTri3[1] = vertices[1];
+        sTri3[2] = vertices[2];
+    }
+    sTri3State = *state;
+}
+void n64psp_directional_light_snorm8_batch(n64psp_vec4f* output, const n64psp_mat4f* matrix,
+                                           const n64psp_snorm8x4* normals, const n64psp_directional_lightf* lights,
+                                           const n64psp_vec4f* ambient, size_t lightCount, size_t count) {
+    (void) output;
+    (void) matrix;
+    (void) normals;
+    (void) lights;
+    (void) ambient;
+    (void) lightCount;
+    (void) count;
 }
 void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1) {
     (void) x0;
@@ -448,6 +473,127 @@ static void test_offscreen_fill(void) {
     assert(sTextures == 1);
 }
 
+static void test_3d_triangle(void) {
+    Gfx* p = sCommands;
+    static Vtx vtx[3];
+    static const Vp vp = { { { 640, 480, 511, 0 }, { 640, 480, 511, 0 } } };
+
+    psp_gfx_mat_identity(sProjection);
+    sProjectionSet = 1;
+    sViewport = vp;
+    psp_gfx_update_viewport_projection();
+
+    vtx[0].v.ob[0] = -10;
+    vtx[0].v.ob[1] = -10;
+    vtx[0].v.ob[2] = 0;
+    vtx[0].v.cn[0] = 255;
+    vtx[0].v.cn[1] = 0;
+    vtx[0].v.cn[2] = 0;
+    vtx[0].v.cn[3] = 255;
+    vtx[1].v.ob[0] = 10;
+    vtx[1].v.ob[1] = -10;
+    vtx[1].v.ob[2] = 0;
+    vtx[1].v.cn[0] = 0;
+    vtx[1].v.cn[1] = 255;
+    vtx[1].v.cn[2] = 0;
+    vtx[1].v.cn[3] = 255;
+    vtx[2].v.ob[0] = 0;
+    vtx[2].v.ob[1] = 10;
+    vtx[2].v.ob[2] = -5;
+    vtx[2].v.cn[0] = 0;
+    vtx[2].v.cn[1] = 0;
+    vtx[2].v.cn[2] = 255;
+    vtx[2].v.cn[3] = 255;
+
+    sTri3Count = 0;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
+    gDPSetRenderMode(p++, Z_CMP | Z_UPD, Z_CMP | Z_UPD);
+    gSPVertex(p++, vtx, 3, 0);
+    gSPModifyVertex(p++, 0, G_MWO_POINT_ST, 0x12345678);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3[0].x == -10.0f && sTri3[0].y == -10.0f && sTri3[0].z == 0.0f);
+    assert(sTri3[2].z == -5.0f);
+    assert(sTri3[0].color == 0xFF0000FFu);
+    assert(sTri3[1].color == 0xFF00FF00u);
+    assert(sTri3[2].color == 0xFFFF0000u);
+    assert(sTri3State.depthTest == 1);
+    assert(sTri3State.depthWrite == 1);
+    assert(sTri3State.cullBack == 1 && sTri3State.cullFront == 0);
+    assert(sTri3State.projection == &sViewportProjection[0][0]);
+    assert(sVtx[0].v.tc[0] == 0x1234 && sVtx[0].v.tc[1] == 0x5678);
+
+    /* Clear 3D state so later 2D tests stay on the software path */
+    p = sCommands;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_CULL_BACK);
+    sProjectionSet = 0;
+    run(p);
+}
+
+static void test_perspective_y(void) {
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    PspGfxVertex out;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+
+    /* ndc y = +0.1 must land above the centre row */
+    sVtx[0].v.ob[0] = 0;
+    sVtx[0].v.ob[1] = 100;
+    sVtx[0].v.ob[2] = -1000;
+    psp_gfx_transform(0, &out);
+    assert(fabsf(out.y - 144.0f) < 0.01f);
+
+    /* The GE path folds the same viewport, so both must agree */
+    psp_gfx_update_viewport_projection();
+    assert(fabsf(sViewportProjection[1][1] - 0.5f) < 0.0001f);
+    assert(fabsf(sViewportProjection[3][1] + 0.25f) < 0.0001f);
+
+    /* Ortho matrices already carry the flip, w stays 1 */
+    sProjection[2][3] = 0.0f;
+    sProjectionPerspective = 0;
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    sVtx[0].v.ob[1] = 1;
+    sVtx[0].v.ob[2] = 0;
+    psp_gfx_transform(0, &out);
+    assert(fabsf(out.y - 210.0f) < 0.01f);
+
+    sProjectionSet = 0;
+}
+
+static void test_mtx_decode(void) {
+    Mtx m;
+    float mf[4][4];
+    int i;
+    int j;
+
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            m.u.i[i][j] = 0;
+            m.u.f[i][j] = 0;
+        }
+    }
+    /* Element-wise s15.16: integer part in u.i, fraction in u.f */
+    m.u.i[0][0] = 2;
+    m.u.f[0][0] = 0x8000; /* 2.5 */
+    m.u.i[1][2] = 0xFFFE; /* -2 */
+    m.u.f[1][2] = 0xC000; /* -1.25 */
+    m.u.i[3][3] = 1;
+
+    psp_gfx_mtx_l2f(mf, &m);
+    assert(mf[0][0] == 2.5f);
+    assert(mf[1][2] == -1.25f);
+    assert(mf[3][3] == 1.0f);
+    assert(mf[0][1] == 0.0f);
+    assert(mf[1][0] == 0.0f);
+}
+
 int main(void) {
     Gfx* p = sCommands;
 
@@ -465,6 +611,9 @@ int main(void) {
     test_combine_alpha_and_environment();
     test_texture_byte_order();
     test_offscreen_fill();
+    test_3d_triangle();
+    test_perspective_y();
+    test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");
     return 0;

@@ -1,8 +1,10 @@
 #include "src/psp/psp.h"
 #include "src/psp/platform.h"
+#include "src/psp/gfx/gfx_psp.h"
 #include "PR/os.h"
 #include "PR/sptask.h"
 
+#include <math.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
@@ -91,4 +93,80 @@ void PspSelfTest_Run(void) {
     }
 
     pspDebugScreenPrintf("[selftest] %s\n", pass ? "PASS" : "FAIL");
+}
+
+/* Debug-only 3D smoke: perspective triangle, vertex colours, depth, motion */
+void PspSelfTest_Gfx3D(void) {
+    static float sProjection[4][4];
+    static float sModelview[4][4];
+    PspGfxDrawState state;
+    PspGfxVertex3D triangle[3];
+    int frame;
+    int i;
+    int j;
+    float cot;
+    float fovy = 60.0f * 3.1415926f / 180.0f;
+    const float nearZ = 1.0f;
+    const float farZ = 100.0f;
+
+    if (!PspGfx_Init()) {
+        return;
+    }
+
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            sProjection[i][j] = (i == j) ? 1.0f : 0.0f;
+        }
+    }
+    cot = cosf(fovy * 0.5f) / sinf(fovy * 0.5f);
+    sProjection[0][0] = cot / (4.0f / 3.0f);
+    sProjection[1][1] = cot;
+    sProjection[2][2] = (nearZ + farZ) / (nearZ - farZ);
+    sProjection[2][3] = -1.0f;
+    sProjection[3][2] = (2.0f * nearZ * farZ) / (nearZ - farZ);
+    sProjection[3][3] = 0.0f;
+
+    triangle[0].x = 0.0f;
+    triangle[0].y = 1.2f;
+    triangle[0].z = 0.0f;
+    triangle[0].color = 0xFF0000FF; /* red */
+    triangle[1].x = -1.2f;
+    triangle[1].y = -1.2f;
+    triangle[1].z = 0.0f;
+    triangle[1].color = 0xFF00FF00; /* green */
+    triangle[2].x = 1.2f;
+    triangle[2].y = -1.2f;
+    triangle[2].z = 0.0f;
+    triangle[2].color = 0xFFFF0000; /* blue */
+
+    state.projection = &sProjection[0][0];
+    state.modelview = &sModelview[0][0];
+    state.projectionSerial = 1;
+    state.modelviewSerial = 1;
+    state.depthTest = 1;
+    state.depthWrite = 1;
+    state.cullFront = 0;
+    state.cullBack = 0;
+
+    for (frame = 0; frame < 180; frame++) {
+        float angle = (float) frame * (6.2831853f / 180.0f);
+        float c = cosf(angle);
+        float s = sinf(angle);
+
+        for (i = 0; i < 4; i++) {
+            for (j = 0; j < 4; j++) {
+                sModelview[i][j] = (i == j) ? 1.0f : 0.0f;
+            }
+        }
+        /* Rotate about X, then translate back to z = -5 */
+        sModelview[1][1] = c;
+        sModelview[1][2] = -s;
+        sModelview[2][1] = s;
+        sModelview[2][2] = c;
+        sModelview[3][2] = -5.0f;
+
+        PspGfx_BeginFrame();
+        PspGfx_DrawTriangles3D(triangle, 3, &state);
+        PspGfx_Present();
+    }
 }
