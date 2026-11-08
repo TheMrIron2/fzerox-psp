@@ -68,6 +68,16 @@ static u32 sCombineW1;
 static u32 sFillColor;
 static u32 sEnvColor = 0xFFFFFFFF;
 static u32 sPrimLodFrac;
+/* Current RDP colour image; 0 means the game never bound one (draw to screen) */
+static u32 sColorTarget;
+
+/* The game's visible framebuffers are mapped pointers; offscreen clears such as
+ * D_3000170 target raw physical addresses (0x400) that we cannot render to */
+static int psp_gfx_targets_display(void) {
+    u32 addr = sColorTarget;
+
+    return addr == 0 || addr >= 0x08000000u;
+}
 
 typedef struct {
     u32 addr;
@@ -75,35 +85,47 @@ typedef struct {
     int native;
 } PspTextureOrder;
 
-static PspTextureOrder sTextureOrders[512];
+#define PSP_TEXTURE_ORDERS 512
+
+static PspTextureOrder sTextureOrders[PSP_TEXTURE_ORDERS];
 static u32 sTextureOrderCount;
 
+/* Oldest first; a new range purges whatever it overlaps */
 void PspGfx_SetTextureByteOrder(const void* data, u32 size, int native) {
-    u32 i, index;
-    PspTextureOrder order;
+    u32 base = (u32) data;
+    u32 end;
+    u32 i;
 
     if (data == NULL || size == 0) {
         return;
     }
-    for (index = 0; index < sTextureOrderCount; index++) {
-        if (sTextureOrders[index].addr == (u32) data) {
-            break;
+    end = base + size;
+    for (i = 0; i < sTextureOrderCount;) {
+        const PspTextureOrder* order = &sTextureOrders[i];
+
+        if (order->addr < end && base < order->addr + order->size) {
+            u32 j;
+
+            for (j = i; j + 1 < sTextureOrderCount; j++) {
+                sTextureOrders[j] = sTextureOrders[j + 1];
+            }
+            sTextureOrderCount--;
+        } else {
+            i++;
         }
     }
-    if (index == sTextureOrderCount && sTextureOrderCount < 512) {
-        sTextureOrderCount++;
-    } else {
-        if (index == sTextureOrderCount) {
-            index = 0;
+    if (sTextureOrderCount >= PSP_TEXTURE_ORDERS) {
+        u32 j;
+
+        for (j = 0; j + 1 < sTextureOrderCount; j++) {
+            sTextureOrders[j] = sTextureOrders[j + 1];
         }
-        for (i = index; i + 1 < sTextureOrderCount; i++) {
-            sTextureOrders[i] = sTextureOrders[i + 1];
-        }
+        sTextureOrderCount--;
     }
-    order.addr = (u32) data;
-    order.size = size;
-    order.native = native;
-    sTextureOrders[sTextureOrderCount - 1] = order;
+    sTextureOrders[sTextureOrderCount].addr = base;
+    sTextureOrders[sTextureOrderCount].size = size;
+    sTextureOrders[sTextureOrderCount].native = native;
+    sTextureOrderCount++;
 }
 
 int PspGfx_TextureByteOrder(const void* data) {
@@ -263,6 +285,9 @@ static void psp_gfx_transform(int index, PspGfxVertex* out) {
 static void psp_gfx_triangle(u32 i0, u32 i1, u32 i2) {
     PspGfxVertex tri[3];
 
+    if (sColorTarget != 0 && !psp_gfx_targets_display()) {
+        return;
+    }
     psp_gfx_transform(i0, &tri[0]);
     psp_gfx_transform(i1, &tri[1]);
     psp_gfx_transform(i2, &tri[2]);
@@ -527,7 +552,8 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     const u8* src = psp_gfx_tex_source(sLoadAddr);
     u32 srcW = sLoadBlock ? width : (sLoadW << sLoadSiz) >> siz;
     u32 srcX = (sLoadUls << sLoadSiz) >> siz;
-    u32 srcY = sLoadUlt;
+    /* Tiled loads encode T at <<1, so use the render tile's 10.2 ult instead */
+    u32 srcY = sLoadBlock ? sLoadUlt : (sTileUlt[tile] >> 2);
     u32 paletteKey = fmt == G_IM_FMT_CI
                          ? (sPaletteVersion << 6) | (((sOtherModeH >> G_MDSFT_TEXTLUT) & 3) << 4) | sTilePalette[tile]
                          : 0;
@@ -627,6 +653,9 @@ static void psp_gfx_texrect(const Gfx* cur) {
     int modulate;
 
     if ((half1->words.w0 >> 24) != G_RDPHALF_1 || (half2->words.w0 >> 24) != G_RDPHALF_2) {
+        return;
+    }
+    if (!psp_gfx_targets_display()) {
         return;
     }
     if (cycle == G_CYC_COPY) {
@@ -786,6 +815,9 @@ static void psp_gfx_walk(const Gfx* dl) {
                 }
                 break;
             }
+            case G_SETCIMG:
+                sColorTarget = w1;
+                break;
             case G_SETENVCOLOR:
                 sEnvColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
                 break;
@@ -851,6 +883,10 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 cycle = sOtherModeH & (3u << G_MDSFT_CYCLETYPE);
                 int inclusive = cycle == G_CYC_FILL || cycle == G_CYC_COPY;
 
+                if (!psp_gfx_targets_display()) {
+                    break;
+                }
+
                 PspGfx_DrawSolidRect(ulx, uly, lrx + inclusive, lry + inclusive,
                                      cycle == G_CYC_FILL ? sFillColor : sPrimColor8888);
                 break;
@@ -889,6 +925,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         sViewport.vp.vtrans[3] = 0;
     }
 
+    sColorTarget = 0;
     sTexPoolUsed = 0;
     sTexEntryCount = 0;
     sTexReplaceNext = 0;

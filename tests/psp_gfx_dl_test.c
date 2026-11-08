@@ -361,6 +361,11 @@ static void test_texture_byte_order(void) {
     }
     run(p);
     assert(sPixels[0] == 0xF0F0);
+    /* A reused buffer must drop the stale range it overlaps */
+    PspGfx_SetTextureByteOrder(gPspN64Ram, 128, 1);
+    PspGfx_SetTextureByteOrder(gPspN64Ram + 16, 16, 0);
+    assert(PspGfx_TextureByteOrder(gPspN64Ram + 16) == 0);
+    assert(sTextureOrderCount == 1);
 }
 
 static void test_boot_framebuffer(void) {
@@ -369,6 +374,28 @@ static void test_boot_framebuffer(void) {
     PspGfx_PresentFramebuffer(sCpuFrame);
     assert(sTextures == 1 && sRect[2] == 320 && sRect[3] == 240);
     assert(sWidth == 512 && sHeight == 256 && sPixels[70 * 512 + 96] == 0xF00F);
+}
+
+static void test_offscreen_fill(void) {
+    Gfx* p = sCommands;
+
+    for (int i = 0; i < 32 * 32; i++) {
+        sNative[i] = 0xF801;
+    }
+    /* Offscreen render target: the white clear must not reach the screen */
+    gDPSetColorImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, 0x00000400);
+    gDPSetCycleType(p++, G_CYC_FILL);
+    gDPSetFillColor(p++, 0xFFFCFFFC);
+    gDPFillRectangle(p++, 12, 8, 307, 231);
+    /* Bind a visible framebuffer (mapped pointer) and draw a quad */
+    gDPSetColorImage(p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, 0x09000000);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 8, 0, 0, 0, 0, 0, 0, 0);
+    gSPTextureRectangle(p++, 0, 0, 8 << 2, 8 << 2, 0, 0, 0, 1024, 1024);
+    run(p);
+    assert(sSolids == 0);
+    assert(sTextures == 1);
 }
 
 int main(void) {
@@ -388,6 +415,7 @@ int main(void) {
     test_rgba_blink_and_background();
     test_combine_alpha_and_environment();
     test_texture_byte_order();
+    test_offscreen_fill();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");
     return 0;

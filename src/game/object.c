@@ -5,6 +5,7 @@
 #include "segment_symbols.h"
 #ifdef PSP
 #include "src/psp/gfx/gfx_psp.h"
+#include "src/psp/psp.h"
 #endif
 
 TextureCacheEntry gTextureCache[200];
@@ -14,6 +15,9 @@ TexSwapSlot gTextureSwapSlots[16];
 QueuedTextureLoad gQueuedTextureLoads[16];
 
 void TextureCache_LoadAssetData(s32 segAddr, size_t size, u8* dest) {
+    if (dest == NULL) {
+        return;
+    }
     CLEAR_DATA_CACHE(dest, size);
 #ifdef PSP
     /* Assets are embedded in the ELF, so segAddr is already a host pointer */
@@ -32,15 +36,21 @@ void TextureCache_LoadAssetData(s32 segAddr, size_t size, u8* dest) {
 
 #ifdef PSP
 static void TextureCache_MakeNative(CacheTexInfo* info, void* data) {
-    s32 format = info->format & ~TEX_CACHE_MIO0_FLAG;
+    s32 format;
+    if (info == NULL || data == NULL) {
+        return;
+    }
+    format = info->format & ~TEX_CACHE_MIO0_FLAG;
     u16* pixels = data;
     s32 count = info->width * info->height;
     s32 i;
+    /* MIO0 output is always big endian bytes */
+    int bigEndian = (info->format & TEX_CACHE_MIO0_FLAG) || !PspGfx_TextureByteOrder(data);
 
     if (format != TEX_CACHE_FMT_RGBA16 && format != TEX_CACHE_FMT_RGBA16_TILED) {
         return;
     }
-    if (!PspGfx_TextureByteOrder(data)) {
+    if (bigEndian) {
         for (i = 0; i < count; i++) {
             u16 pixel = pixels[i];
 
@@ -51,11 +61,63 @@ static void TextureCache_MakeNative(CacheTexInfo* info, void* data) {
 }
 #endif
 
+#ifdef PSP
+static void TextureCache_ResetPool(void);
+#endif
+
 void TextureCache_ResetCache(void) {
     gTextureCacheCount = 0;
+#ifdef PSP
+    /* Cached buffers are dropped here, so the pool can restart */
+    TextureCache_ResetPool();
+#endif
 }
 
 extern uintptr_t gArenaStartPtrs[];
+
+#ifdef PSP
+/* Texture cache gets its own storage so game arena traffic cannot recycle it */
+#define PSP_TEX_CACHE_POOL (2 * 1024 * 1024)
+/* Largest compressed asset is under 96 KiB; decode is synchronous */
+#define PSP_TEX_HEADER_SCRATCH 0x18000
+static u8 sTextureCachePool[PSP_TEX_CACHE_POOL] __attribute__((aligned(64)));
+static u8 sTextureHeaderScratch[PSP_TEX_HEADER_SCRATCH] __attribute__((aligned(64)));
+static u32 sTextureCachePoolUsed;
+
+static void TextureCache_ResetPool(void) {
+    sTextureCachePoolUsed = 0;
+}
+
+static void* TextureCache_Alloc(size_t size) {
+    static int sWrapped;
+    u8* ret;
+
+    size = (size + 63u) & ~(size_t) 63u;
+    if (size > PSP_TEX_CACHE_POOL) {
+        return NULL;
+    }
+    if (sTextureCachePoolUsed + size > PSP_TEX_CACHE_POOL) {
+        /* Recycle oldest buffers rather than failing to draw */
+        if (!sWrapped) {
+            sWrapped = 1;
+            PspLog("[tex] cache pool wrapped at %u bytes\n", (unsigned) sTextureCachePoolUsed);
+        }
+        sTextureCachePoolUsed = 0;
+    }
+    ret = &sTextureCachePool[sTextureCachePoolUsed];
+    sTextureCachePoolUsed += size;
+    return ret;
+}
+static u8* TextureCache_HeaderBuffer(size_t size) {
+    if (size > PSP_TEX_HEADER_SCRATCH) {
+        return NULL;
+    }
+    return sTextureHeaderScratch;
+}
+#else
+#define TextureCache_Alloc(size) Arena_Allocate(ALLOC_FRONT, size)
+#define TextureCache_HeaderBuffer(size) Arena_Allocate(ALLOC_PEEK, size)
+#endif
 
 u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceReload, bool singleEntry) {
     bool alreadyCached;
@@ -93,7 +155,7 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                         alignedWidth = texInfo->width;
                     }
                     textureSize = texInfo->height * alignedWidth;
-                    texture = Arena_Allocate(ALLOC_FRONT, textureSize);
+                    texture = TextureCache_Alloc(textureSize);
                     TextureCache_LoadAssetData(texInfo->segAddr, textureSize, texture);
                     break;
                 case TEX_CACHE_MIO0(TEX_CACHE_FMT_I4):
@@ -110,8 +172,8 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                     } else {
                         headerSize = 0x400;
                     }
-                    texture = Arena_Allocate(ALLOC_FRONT, textureSize);
-                    header = Arena_Allocate(ALLOC_PEEK, headerSize);
+                    texture = TextureCache_Alloc(textureSize);
+                    header = TextureCache_HeaderBuffer(headerSize);
                     CLEAR_DATA_CACHE(header, headerSize);
                     TextureCache_LoadAssetData(texInfo->segAddr, headerSize, header);
                     if (FZX_IS_MIO0(header)) {
@@ -128,8 +190,8 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                         i = 0x400;
                     }
 
-                    texture = Arena_Allocate(ALLOC_FRONT, texInfo->height * texInfo->width * 2);
-                    header = Arena_Allocate(ALLOC_PEEK, i);
+                    texture = TextureCache_Alloc(texInfo->height * texInfo->width * 2);
+                    header = TextureCache_HeaderBuffer(i);
                     CLEAR_DATA_CACHE(header, i);
                     TextureCache_LoadAssetData(texInfo->segAddr, i, header);
                     if (FZX_IS_MIO0(header)) {
@@ -140,20 +202,24 @@ u8* TextureCache_LoadCacheTexInfoList_impl(CacheTexInfo* texInfo, bool forceRelo
                     break;
                 default:
                     i = texInfo->height * texInfo->width * 2;
-                    texture = Arena_Allocate(ALLOC_FRONT, i);
+                    texture = TextureCache_Alloc(i);
                     TextureCache_LoadAssetData(texInfo->segAddr, i, texture);
                     break;
             }
-#ifdef PSP
-            TextureCache_MakeNative(texInfo, texture);
-#endif
+            if (texture == NULL) {
+                texInfo++;
+                continue;
+            }
             if (!foundFirst) {
                 firstTexture = texture;
                 foundFirst = true;
             }
-            cache[gTextureCacheCount].segAddr = texInfo->segAddr;
-            cache[gTextureCacheCount].texture = texture;
-            gTextureCacheCount++;
+            /* Cache is a lookup accelerator; never write past the table */
+            if (gTextureCacheCount < (s32) ARRAY_COUNT(gTextureCache)) {
+                cache[gTextureCacheCount].segAddr = texInfo->segAddr;
+                cache[gTextureCacheCount].texture = texture;
+                gTextureCacheCount++;
+            }
         }
 
 #ifdef EXPANSION_KIT
@@ -224,9 +290,12 @@ u8* TextureCache_LoadCacheTexInfoListEK(CacheTexInfo* texInfo, bool singleEntry)
                 firstTexture = texture;
                 foundFirst = true;
             }
-            cache[gTextureCacheCount].segAddr = texInfo->segAddr;
-            cache[gTextureCacheCount].texture = texture;
-            gTextureCacheCount++;
+            /* Cache is a lookup accelerator; never write past the table */
+            if (gTextureCacheCount < (s32) ARRAY_COUNT(gTextureCache)) {
+                cache[gTextureCacheCount].segAddr = texInfo->segAddr;
+                cache[gTextureCacheCount].texture = texture;
+                gTextureCacheCount++;
+            }
         }
         texInfo++;
     }
@@ -290,9 +359,11 @@ void* TextureCache_LoadAndCache(void* segAddr, s32 textureSize, bool forceReload
             }
         }
         if (!noCache) {
-            cache[gTextureCacheCount].segAddr = segAddr;
-            cache[gTextureCacheCount].texture = texture;
-            gTextureCacheCount++;
+            if (gTextureCacheCount < (s32) ARRAY_COUNT(gTextureCache)) {
+                cache[gTextureCacheCount].segAddr = segAddr;
+                cache[gTextureCacheCount].texture = texture;
+                gTextureCacheCount++;
+            }
         }
     } else {
         // FAKE
@@ -590,7 +661,7 @@ void TextureCache_ProcessLoadQueue(void) {
                     } else {
                         size = 0x400;
                     }
-                    header = Arena_Allocate(ALLOC_PEEK, size);
+                    header = TextureCache_HeaderBuffer(size);
                     CLEAR_DATA_CACHE(header, size);
                     TextureCache_LoadAssetData(texInfo->segAddr, size, header);
                     if (FZX_IS_MIO0(header)) {
@@ -604,9 +675,6 @@ void TextureCache_ProcessLoadQueue(void) {
                     TextureCache_LoadAssetData(texInfo->segAddr, size * 2, load->texture);
                     break;
             }
-#ifdef PSP
-            TextureCache_MakeNative(texInfo, load->texture);
-#endif
             load->CacheTexInfo = NULL;
             load++;
         } else {

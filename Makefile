@@ -65,6 +65,8 @@ CFLAGS += -DPSP -D__PSP__ -D_PSP_FW_VERSION=600
 CFLAGS += -D_LANGUAGE_C -DF3DEX_GBI_2 -D_MIPS_SZLONG=32
 CFLAGS += -fno-builtin -fno-common -fno-strict-aliasing -fwrapv -funsigned-char
 CFLAGS += -ffunction-sections -fdata-sections
+# Source text is UTF-8 but the game's font tables are indexed by EUC-JP codes
+CFLAGS += -finput-charset=UTF-8 -fexec-charset=EUC-JP
 
 ifeq ($(PSP_FULL),1)
 CFLAGS += -DVERSION_US=1 -DNDEBUG -DNON_MATCHING -DAVOID_UB -DCOMPILER_GCC -DPSP_FULL=1

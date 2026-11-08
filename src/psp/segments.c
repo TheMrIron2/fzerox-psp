@@ -7,7 +7,7 @@
 u8 gPspN64Ram[0x800000] __attribute__((aligned(64)));
 
 #ifndef PSP_FULL
-/* Bootstrap has no game segment table; keep the renderer linkable */
+/* Bootstrap has no game state; keep the renderer linkable */
 u32 gSegments[16];
 #endif
 
