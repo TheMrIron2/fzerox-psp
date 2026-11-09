@@ -6,6 +6,10 @@
 #include <pspdisplay.h>
 #include <pspkernel.h>
 
+#ifdef PSP_FULL
+extern s32 gGameMode;
+#endif
+
 typedef struct PspEvent {
     OSMesgQueue* mq;
     OSMesg msg;
@@ -17,11 +21,30 @@ static OSMesg sViMsg;
 static u32 sViRetraceCount = 1;
 static u32 sViRetraceCounter;
 static volatile u32 sViCount;
+/* Keep retraces from filling the scheduler queue during synchronous graphics */
+static volatile int sViPending;
 /* Sampled on the input thread; the renderer only reads this flag */
 static volatile int sDiagKey;
 static SceUID sViThreadId = -1;
 static volatile u32 sGfxTaskCount;
 static volatile u32 sAudioTaskCount;
+
+static void psp_vi_retrace(void) {
+    sViCount++;
+    if (sViMq != NULL && ++sViRetraceCounter >= sViRetraceCount) {
+        sViRetraceCounter = 0;
+        if (!sViPending) {
+            sViPending = 1;
+            if (osSendMesg(sViMq, sViMsg, OS_MESG_NOBLOCK) != 0) {
+                sViPending = 0;
+            }
+        }
+    }
+}
+
+void PspPlatform_ConsumeViEvent(void) {
+    sViPending = 0;
+}
 
 static int psp_vi_thread(SceSize args, void* argp) {
     (void) args;
@@ -29,13 +52,7 @@ static int psp_vi_thread(SceSize args, void* argp) {
 
     for (;;) {
         sceDisplayWaitVblankStart();
-        sViCount++;
-        if (sViMq != NULL) {
-            if (++sViRetraceCounter >= sViRetraceCount) {
-                sViRetraceCounter = 0;
-                osSendMesg(sViMq, sViMsg, OS_MESG_NOBLOCK);
-            }
-        }
+        psp_vi_retrace();
     }
 
     return 0;
@@ -64,6 +81,7 @@ void PspPlatform_SetViEvent(OSMesgQueue* mq, OSMesg msg, u32 retraceCount) {
     sViMsg = msg;
     sViRetraceCount = (retraceCount == 0) ? 1 : retraceCount;
     sViRetraceCounter = 0;
+    sViPending = 0;
 }
 
 static s8 psp_stick_axis(s32 delta) {
@@ -143,6 +161,17 @@ int PspPlatform_DiagKey(void) {
 
 void PspPlatform_RunGfxTask(OSTask* task) {
     static int sGfxInit;
+#ifdef PSP_FULL
+    static s32 sLastMode = -1;
+    static u32 sModeTasks;
+    int trace;
+
+    if (sLastMode != gGameMode) {
+        sLastMode = gGameMode;
+        sModeTasks = 0;
+    }
+    trace = sModeTasks++ < 2;
+#endif
 
     sGfxTaskCount++;
 
@@ -151,17 +180,38 @@ void PspPlatform_RunGfxTask(OSTask* task) {
             PspGfx_Init();
             sGfxInit = 1;
         }
+#ifdef PSP_FULL
+        if (trace) {
+            PspLog("[gfx] mode=%04x task=%u begin dl=%08x\n", (unsigned) sLastMode,
+                   (unsigned) sGfxTaskCount, (unsigned) task->t.data_ptr);
+        }
+#endif
         PspGfx_BeginFrame();
         PspGfx_RunDisplayList((const Gfx*) task->t.data_ptr, task->t.data_size);
+#ifdef PSP_FULL
+        if (trace) {
+            PspLog("[gfx] mode=%04x task=%u decoded tiles=%u\n", (unsigned) sLastMode,
+                   (unsigned) sGfxTaskCount, (unsigned) PspGfx_TexDecodeCount());
+        }
+#endif
         PspGfx_Present();
+#ifdef PSP_FULL
+        if (trace) {
+            PspLog("[gfx] mode=%04x task=%u presented\n", (unsigned) sLastMode, (unsigned) sGfxTaskCount);
+        }
+#endif
     }
 
     /* No RSP/RDP runs; report SP and DP completion so scheduling advances */
     if (sEvents[OS_EVENT_SP].mq != NULL) {
-        osSendMesg(sEvents[OS_EVENT_SP].mq, sEvents[OS_EVENT_SP].msg, OS_MESG_NOBLOCK);
+        if (osSendMesg(sEvents[OS_EVENT_SP].mq, sEvents[OS_EVENT_SP].msg, OS_MESG_NOBLOCK) != 0) {
+            PspLog("[gfx] SP completion queue full\n");
+        }
     }
     if (sEvents[OS_EVENT_DP].mq != NULL) {
-        osSendMesg(sEvents[OS_EVENT_DP].mq, sEvents[OS_EVENT_DP].msg, OS_MESG_NOBLOCK);
+        if (osSendMesg(sEvents[OS_EVENT_DP].mq, sEvents[OS_EVENT_DP].msg, OS_MESG_NOBLOCK) != 0) {
+            PspLog("[gfx] DP completion queue full\n");
+        }
     }
 }
 

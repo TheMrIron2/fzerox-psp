@@ -4,6 +4,9 @@
 #include "fzx_camera.h"
 #include "fzx_course.h"
 #include "src/overlays/ovl_i3/hud.h"
+#ifdef PSP
+#include "src/psp/psp.h"
+#endif
 
 UNUSED s32 D_800DCE40;
 s32 gGameMode;
@@ -530,6 +533,9 @@ void func_800690FC(void) {
 #endif
             }
             gGameMode = gQueuedGameMode;
+#ifdef PSP
+            PspLog("[game] mode=%04x begin\n", (unsigned) gGameMode);
+#endif
             if (gTitleDemoState == TITLE_DEMO_EXIT) {
                 gTitleDemoState = TITLE_DEMO_INACTIVE;
             }
@@ -586,7 +592,13 @@ void func_800690FC(void) {
                                 SEGMENT_BSS_START(ovl_i9), SEGMENT_BSS_SIZE(ovl_i9));
                 switch (sp24) {
                     case 1:
+#ifdef PSP
+                        PspLog("[game] machine lists begin\n");
+#endif
                         func_8008D7E8();
+#ifdef PSP
+                        PspLog("[game] machine lists ready\n");
+#endif
                         break;
                     case 2:
                         Save_LoadGhost(gCourseIndex);
@@ -616,7 +628,13 @@ void func_800690FC(void) {
 
                 switch (sp24) {
                     case 1:
+#ifdef PSP
+                        PspLog("[game] machine lists begin\n");
+#endif
                         func_8008D7E8();
+#ifdef PSP
+                        PspLog("[game] machine lists ready\n");
+#endif
                         break;
                     case 2:
                         sp24ek = 1;
@@ -630,7 +648,13 @@ void func_800690FC(void) {
             Segment_LoadOverlays();
             func_80079EC8();
             sp24 = GAMEMODE_UPDATE;
+#ifdef PSP
+            PspLog("[game] mode=%04x init\n", (unsigned) gGameMode);
+#endif
             sGamemodeInitFuncs[GET_MODE(gGameMode)]();
+#ifdef PSP
+            PspLog("[game] mode=%04x ready\n", (unsigned) gGameMode);
+#endif
 #ifndef EXPANSION_KIT
             func_80068DCC();
 #endif

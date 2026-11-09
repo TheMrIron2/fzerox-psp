@@ -40,7 +40,7 @@ typedef struct {
     s32 texWidth;
     s32 texHeight;
     int modulate;
-    /* 0 = modulate, 1 = replace, 2 = blend by texel alpha */
+    /* 0 modulates the shade and 1 replaces it */
     int texFunc;
     /* 1 = alpha blend source over destination, 0 = opaque */
     int blend;

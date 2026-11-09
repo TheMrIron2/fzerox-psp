@@ -9,6 +9,8 @@
 
 void PspPlatform_SetEventMesg(OSEvent event, OSMesgQueue* mq, OSMesg msg);
 void PspPlatform_SetViEvent(OSMesgQueue* mq, OSMesg msg, u32 retraceCount);
+/* Acknowledge the retrace when the scheduler receives its notification */
+void PspPlatform_ConsumeViEvent(void);
 void PspPlatform_PollInput(OSContPad* pads);
 void PspPlatform_RunGfxTask(OSTask* task);
 void PspPlatform_RunAudioTask(OSTask* task);

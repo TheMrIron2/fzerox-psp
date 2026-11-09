@@ -42,6 +42,8 @@ static u16 sCpuFrame[320 * 240];
 static PspGfxVertex3D sTri3[3];
 static PspGfxDrawState sTri3State;
 static u32 sTri3Count;
+static PspGfxDrawState sTri3States[2048];
+static u32 sTri3Calls;
 
 int PspGfx_Init(void) {
     return 1;
@@ -57,6 +59,8 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     (void) v;
 }
 void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
+    assert(sTri3Calls < 2048);
+    sTri3States[sTri3Calls++] = *state;
     sTri3Count = count;
     if (count >= 3) {
         sTri3[0] = vertices[0];
@@ -131,6 +135,7 @@ void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 w
 static void run(Gfx* end) {
     gSPEndDisplayList(end++);
     sTextures = sSolids = 0;
+    sTri3Calls = 0;
     PspGfx_RunDisplayList(sCommands, (end - sCommands) * sizeof(Gfx));
     PspGfx_EndFrame();
 }
@@ -781,6 +786,10 @@ static void test_3d_mirror_wrap(void) {
     }
 
     /* S mirrors, T clamps */
+    for (i = 0; i < 16 * 16; i++) {
+        sNative[i] = ((i & 15) << 11) | 1;
+    }
+    touch(sNative, sizeof(sNative));
     p = sCommands;
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
@@ -796,10 +805,14 @@ static void test_3d_mirror_wrap(void) {
     assert(sTri3Count == 3);
     assert(sTri3State.texturePixels != NULL);
     assert(sTri3State.wrapS == 0 && sTri3State.wrapT == 1);
-    /* Mirrored S doubles the baked tile, so the coordinate doubles too */
+    /* Mirroring extends the repeat period without changing texel coordinates */
     assert(sTri3State.texWidth == 32);
-    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
+    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
     assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+    assert(sTri3State.texturePixels[0] == 0xF000);
+    assert(sTri3State.texturePixels[15] == 0xF007);
+    assert(sTri3State.texturePixels[16] == 0xF007);
+    assert(sTri3State.texturePixels[31] == 0xF000);
 
     /* MIRROR|CLAMP is a bitfield and clamps: no bake, no doubling */
     sTri3Count = 0;
@@ -906,7 +919,7 @@ static void test_3d_env_lerp_bake(void) {
     p = sCommands;
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
-    /* Alpha muxes all zero, like the machine's highlight pass */
+    /* Zero alpha must survive opaque vertex colours */
     gDPSetCombineLERP(p++, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, 0, 0, 0, 0, TEXEL0, ENVIRONMENT,
                       TEXEL0_ALPHA, ENVIRONMENT, 0, 0, 0, 0);
     gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
@@ -919,18 +932,114 @@ static void test_3d_env_lerp_bake(void) {
 
     assert(sTri3Count == 3);
     assert(sTri3State.texturePixels != NULL);
-    /* The GE blends the raw texel with the paint colour, so the tile stays raw */
-    assert(sTri3State.texFunc == 2);
-    assert(sTri3State.texturePixels[0] == 0x8888);
-    /* Blend colour is the paint faded by the shade; unlit white vertices keep it blue.
-     * A zero combiner alpha must stay zero so the pass does not cover the body. */
-    assert(sTri3[0].color == 0x00FF0000u);
+    assert(sTri3State.texFunc == 1);
+    /* Half intensity keeps blue paint with a grey highlight and zero alpha */
+    assert(sTri3State.texturePixels[0] == 0x0C44);
+
+    p = sCommands;
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineLERP(p++, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
+                      COMBINED, 0, SHADE, 0, 0, 0, 0, COMBINED);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3State.texFunc == 0);
+    assert(sTri3State.texturePixels[0] == 0xFC44);
+
+    p = sCommands;
+    gDPSetPrimColor(p++, 0, 0, 255, 255, 0, 255);
+    gDPSetCombineLERP(p++, PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, 0, 0, 0, ENVIRONMENT,
+                      COMBINED, 0, SHADE, 0, 0, 0, 0, COMBINED);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    /* Stripe interpolates yellow and blue rather than texel and blue */
+    assert(sTri3State.texturePixels[0] == 0xF788);
+
+    {
+        const u16* pixels = sTri3State.texturePixels;
+        u32 decoded = sTexDecodeCount;
+
+        p = sCommands;
+        gSP1Triangle(p++, 0, 1, 2, 0);
+        run(p);
+        assert(sTexDecodeCount == decoded);
+        assert(sTri3State.texturePixels == pixels);
+    }
 
     p = sCommands;
     sProjectionPerspective = 0;
     sProjectionSet = 0;
     gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
     run(p);
+}
+
+static void test_3d_material_tiles(void) {
+    static u8 maps[8][512];
+    static u16 rgba[16 * 16];
+    static Vtx vtx[3];
+    static const u32 bases[8] = { 0, 0x10, 0x50, 0x60, 0x70, 0xB0, 0xD0, 0x110 };
+    static const u32 widths[8] = { 16, 16, 16, 16, 64, 16, 32, 32 };
+    static const u32 heights[8] = { 16, 16, 16, 16, 16, 32, 32, 32 };
+    static const u16 expected[8] = { 0x1111, 0xF00F, 0xF222, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888 };
+    Gfx* p = sCommands;
+    u32 i, j;
+
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sProjection);
+    psp_gfx_mat_identity(sModelView);
+    for (i = 0; i < 8; i++) {
+        for (j = 0; j < sizeof(maps[i]); j++) {
+            maps[i][j] = (i + 1) * 0x11;
+        }
+        touch(maps[i], sizeof(maps[i]));
+    }
+    for (i = 0; i < 16 * 16; i++) {
+        rgba[i] = 0xF801;
+    }
+    PspGfx_SetTextureByteOrder(rgba, sizeof(rgba), 1);
+    gSPClearGeometryMode(p++, G_LIGHTING | G_TEXTURE_GEN);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gSPVertex(p++, vtx, 3, 0);
+    /* Reuse load tile seven for every material as the machine loader does */
+    for (i = 0; i < 8; i++) {
+        if (i == 1) {
+            gDPLoadMultiBlock(p++, rgba, bases[i], i, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16,
+                             0, G_TX_CLAMP, G_TX_CLAMP, 4, 4, 0, 0);
+        } else {
+            gDPLoadMultiBlock_4b(p++, maps[i], bases[i], i, i == 2 ? G_IM_FMT_IA : G_IM_FMT_I,
+                                widths[i], heights[i], 0, G_TX_CLAMP, G_TX_CLAMP, 0, 0, 0, 0);
+        }
+    }
+    for (i = 0; i < 16; i++) {
+        gSPTexture(p++, 0xFFFF, 0xFFFF, 0, i & 7, G_ON);
+        gSP1Triangle(p++, 0, 1, 2, 0);
+    }
+    run(p);
+    assert(sTri3Calls == 16);
+    for (i = 0; i < 16; i++) {
+        const PspGfxDrawState* state = &sTri3States[i];
+
+        assert(state->texturePixels != NULL);
+        assert(state->texWidth == widths[i & 7]);
+        assert(state->texHeight == heights[i & 7]);
+        assert(state->texturePixels[0] == expected[i & 7]);
+        assert(state->texturePixels[state->texWidth * state->texHeight - 1] == expected[i & 7]);
+    }
+
+    p = sCommands;
+    /* Reload one TMEM region without changing the render tile descriptor */
+    gDPSetTextureImage(p++, G_IM_FMT_I, G_IM_SIZ_16b, 1, maps[7]);
+    gDPSetTile(p++, G_IM_FMT_I, G_IM_SIZ_16b, 0, bases[2], 7, 0, 0, 0, 0, 0, 0, 0);
+    gDPLoadBlock(p++, 7, 0, 0, 63, CALC_DXT_4b(16));
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, 2, G_ON);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, 1, G_ON);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3States[0].texturePixels[0] == 0x0999);
+    assert(sTri3States[1].texturePixels[0] == 0xF00F);
+    sProjectionSet = sProjectionPerspective = 0;
 }
 
 static void test_mtx_decode(void) {
@@ -985,6 +1094,7 @@ int main(void) {
     test_3d_mirror_wrap();
     test_3d_uv_scale();
     test_3d_env_lerp_bake();
+    test_3d_material_tiles();
     test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");

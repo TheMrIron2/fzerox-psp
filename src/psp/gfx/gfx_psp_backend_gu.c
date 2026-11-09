@@ -412,9 +412,11 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
             sceKernelDcacheWritebackRange((void*) state->texturePixels,
                                           (unsigned) (state->texWidth * state->texHeight * (s32) sizeof(u16)));
             sceGuTexImage(0, state->texWidth, state->texHeight, state->texWidth, state->texturePixels);
+            /* The interpreter supplies texels and the GE expects normalized coordinates */
+            sceGuTexScale(1.0f / state->texWidth, 1.0f / state->texHeight);
+            sceGuTexOffset(0.0f, 0.0f);
             sceGuTexFlush();
-            sceGuTexFunc(texFunc == 2 ? GU_TFX_BLEND : (texFunc ? GU_TFX_REPLACE : GU_TFX_MODULATE),
-                         GU_TCC_RGBA);
+            sceGuTexFunc(texFunc ? GU_TFX_REPLACE : GU_TFX_MODULATE, GU_TCC_RGBA);
             sceGuTexFilter(filter ? GU_LINEAR : GU_NEAREST, filter ? GU_LINEAR : GU_NEAREST);
             sceGuTexWrap(state->wrapS ? GU_CLAMP : GU_REPEAT, state->wrapT ? GU_CLAMP : GU_REPEAT);
             sTexBoundPixels = state->texturePixels;

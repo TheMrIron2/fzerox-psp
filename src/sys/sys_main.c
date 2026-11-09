@@ -3,6 +3,9 @@
 #include "fzx_thread.h"
 #include "PR/viint.h"
 #include "PR/leo.h"
+#ifdef PSP
+#include "src/psp/platform.h"
+#endif
 
 char sBootThreadStack[0x200];
 char sIdleThreadStack[0x200];
@@ -367,6 +370,9 @@ void Main_ThreadEntry(void* arg0) {
                     break;
             }
         } else if (msg == (OSMesg) EVENT_MESG_VI) {
+#ifdef PSP
+            PspPlatform_ConsumeViEvent();
+#endif
             osSendMesg(&gAudioTaskMesgQueue, (OSMesg) EVENT_MESG_NEXT_AUDIO_TASK, OS_MESG_NOBLOCK);
 #ifdef EXPANSION_KIT
             osSendMesg(&D_8079A2E8, (OSMesg) 1, OS_MESG_NOBLOCK);
