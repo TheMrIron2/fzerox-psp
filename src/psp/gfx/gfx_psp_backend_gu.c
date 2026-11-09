@@ -43,6 +43,8 @@ static const u16* sTexBoundPixels;
 static s32 sTexBoundWidth;
 static s32 sTexBoundHeight;
 static int sTexBoundModulate;
+static u32 sTexBoundWrap;
+static int sTexBoundFilter;
 
 static const ScePspFMatrix4 sIdentityMatrix __attribute__((aligned(16))) = {
     { 1.0f, 0.0f, 0.0f, 0.0f },
@@ -398,22 +400,28 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
     }
 
     if (state->texturePixels != NULL && state->texWidth > 0 && state->texHeight > 0) {
+        u32 wrap = (u32) ((state->wrapS != 0) | ((state->wrapT != 0) << 1));
+        int filter = state->filter != 0;
+        int modulate = state->modulate != 0;
+
         if (!sTexBoundValid || sTexBoundPixels != state->texturePixels ||
             sTexBoundWidth != state->texWidth || sTexBoundHeight != state->texHeight ||
-            sTexBoundModulate != (state->modulate != 0)) {
+            sTexBoundModulate != modulate || sTexBoundWrap != wrap || sTexBoundFilter != filter) {
             sceGuEnable(GU_TEXTURE_2D);
             sceGuTexMode(GU_PSM_4444, 0, 0, 0);
             sceKernelDcacheWritebackRange((void*) state->texturePixels,
                                           (unsigned) (state->texWidth * state->texHeight * (s32) sizeof(u16)));
             sceGuTexImage(0, state->texWidth, state->texHeight, state->texWidth, state->texturePixels);
             sceGuTexFlush();
-            sceGuTexFunc(state->modulate ? GU_TFX_MODULATE : GU_TFX_REPLACE, GU_TCC_RGBA);
-            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
-            sceGuTexWrap(GU_REPEAT, GU_REPEAT);
+            sceGuTexFunc(modulate ? GU_TFX_MODULATE : GU_TFX_REPLACE, GU_TCC_RGBA);
+            sceGuTexFilter(filter ? GU_LINEAR : GU_NEAREST, filter ? GU_LINEAR : GU_NEAREST);
+            sceGuTexWrap(state->wrapS ? GU_CLAMP : GU_REPEAT, state->wrapT ? GU_CLAMP : GU_REPEAT);
             sTexBoundPixels = state->texturePixels;
             sTexBoundWidth = state->texWidth;
             sTexBoundHeight = state->texHeight;
-            sTexBoundModulate = state->modulate != 0;
+            sTexBoundModulate = modulate;
+            sTexBoundWrap = wrap;
+            sTexBoundFilter = filter;
             sTexBoundValid = 1;
         }
     } else {

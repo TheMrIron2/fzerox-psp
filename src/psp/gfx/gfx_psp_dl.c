@@ -99,6 +99,8 @@ static u16 sPalette[256];
 static u32 sPaletteHash;
 static u32 sTileWidth[8];
 static u32 sTileHeight[8];
+static u32 sTileCms[8];
+static u32 sTileCmt[8];
 static u32 sTileUls[8];
 static u32 sTileUlt[8];
 static u32 sLoadAddr;
@@ -246,6 +248,8 @@ typedef struct {
     u32 srcY;
     u32 paletteKey;
     u32 variant;
+    /* Bit 0 mirrors S, bit 1 mirrors T; baked into the decoded tile */
+    u32 mirror;
     u32 combine0;
     u32 combine1;
     u32 mode;
@@ -454,11 +458,15 @@ static void psp_gfx_transform(int index, PspGfxVertex* out) {
     out->color = psp_gfx_vertex_color(v);
 }
 
-static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant);
+static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant, u32 mirror);
 
 /* 3D texture cache: refetch when the load/tile state changes */
 static PspTexEntry* s3dTexEntry;
+static u32 s3dTexMirror;
 static int s3dTexDirty = 1;
+/* Baked variants decode per draw; cap the work a frame can spend on them */
+#define PSP_GFX_FRAME_BAKE_LIMIT 64
+static u32 sFrameBakes;
 
 static u8 psp_gfx_remap_light(float value) {
     if (value <= 0.0f) {
@@ -499,31 +507,62 @@ static int psp_gfx_3d_final_cycle(void) {
     return (sOtherModeH & (3u << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE ? 1 : 0;
 }
 
-static int psp_gfx_3d_combiner_uses_texture(void) {
-    u32 a;
-    u32 b;
-    u32 d;
-    u32 aa;
-    u32 ab;
-    u32 ad;
+/* cm/cmt is a bitfield: NOMIRROR|CLAMP, MIRROR|WRAP, MIRROR|CLAMP and so on.
+ * Clamp wins when both are set; the machine shading ramp depends on it. */
+static u32 psp_gfx_tile_mirror(u32 cm) {
+    return (cm & 2u) ? 0u : (cm & 1u);
+}
 
-    if (psp_gfx_3d_final_cycle()) {
-        a = (sCombineW0 >> 5) & 15;
-        b = (sCombineW1 >> 24) & 15;
-        d = (sCombineW1 >> 6) & 7;
-        aa = (sCombineW1 >> 21) & 7;
-        ab = (sCombineW1 >> 3) & 7;
-        ad = sCombineW1 & 7;
+static int psp_gfx_tile_clamp(u32 cm) {
+    return (cm & 2u) != 0;
+}
+
+typedef struct {
+    u32 a, b, c, d;
+    u32 aa, ab, ac, ad;
+} PspCombineCycle;
+
+static PspCombineCycle psp_gfx_combine_cycle(int second) {
+    PspCombineCycle c;
+
+    if (second) {
+        c.a = (sCombineW0 >> 5) & 15;
+        c.b = (sCombineW1 >> 24) & 15;
+        c.c = sCombineW0 & 31;
+        c.d = (sCombineW1 >> 6) & 7;
+        c.aa = (sCombineW1 >> 21) & 7;
+        c.ab = (sCombineW1 >> 3) & 7;
+        c.ac = (sCombineW1 >> 18) & 7;
+        c.ad = sCombineW1 & 7;
     } else {
-        a = (sCombineW0 >> 20) & 15;
-        b = (sCombineW1 >> 28) & 15;
-        d = (sCombineW1 >> 15) & 7;
-        aa = (sCombineW0 >> 12) & 7;
-        ab = (sCombineW1 >> 12) & 7;
-        ad = (sCombineW0 >> 9) & 7;
+        c.a = (sCombineW0 >> 20) & 15;
+        c.b = (sCombineW1 >> 28) & 15;
+        c.c = (sCombineW0 >> 15) & 31;
+        c.d = (sCombineW1 >> 15) & 7;
+        c.aa = (sCombineW0 >> 12) & 7;
+        c.ab = (sCombineW1 >> 12) & 7;
+        c.ac = (sCombineW0 >> 9) & 7;
+        c.ad = (sCombineW1 >> 9) & 7;
     }
-    return a == G_CCMUX_TEXEL0 || b == G_CCMUX_TEXEL0 || d == G_CCMUX_TEXEL0 ||
-           aa == G_ACMUX_TEXEL0 || ab == G_ACMUX_TEXEL0 || ad == G_ACMUX_TEXEL0;
+    return c;
+}
+
+/* Any cycle that reads TEXEL0 means the draw needs a texture. Two cycle
+ * modes usually sample in the first cycle and pass the result in the second. */
+static int psp_gfx_3d_combiner_uses_texture(void) {
+    int cycles = psp_gfx_3d_final_cycle() ? 2 : 1;
+    int cycle;
+
+    for (cycle = 0; cycle < cycles; cycle++) {
+        PspCombineCycle c = psp_gfx_combine_cycle(cycles == 2 && cycle == 1);
+
+        if (c.a == G_CCMUX_TEXEL0 || c.b == G_CCMUX_TEXEL0 || c.c == G_CCMUX_TEXEL0 ||
+            c.d == G_CCMUX_TEXEL0 || c.aa == G_ACMUX_TEXEL0 || c.ab == G_ACMUX_TEXEL0 ||
+            c.ac == G_ACMUX_TEXEL0 || c.ad == G_ACMUX_TEXEL0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int psp_gfx_3d_combiner_modulate(void) {
@@ -552,13 +591,19 @@ enum {
 };
 
 static int psp_gfx_3d_shade_source(void);
+static int psp_gfx_3d_needs_bake(u32 width, u32 height);
+static u16 psp_gfx_3d_bake_texel(u16 pixel, const PspCombineCycle* c);
 
-/* Generated coordinates: n64psp gives 16.16 of the [0,0.5] sphere and
- * gSPTexture scale turns that into S10.5, where 32 units make one texel */
+/* Generated coordinates: n64psp gives 16.16 of the [0,0.5] sphere, which
+ * covers one texture width at full scale, then gSPTexture scales it */
 static n64psp_packed_vertex sTexgenVertices[3];
 
 static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
     n64psp_texcoord_s10_5 tc[3];
+    float scaleS = (float) sTexgenScaleS / 65536.0f;
+    float scaleT = (float) sTexgenScaleT / 65536.0f;
+    float width = (float) sTileWidth[0];
+    float height = (float) sTileHeight[0];
     int i;
 
     for (i = 0; i < 3; i++) {
@@ -573,8 +618,8 @@ static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
                                                                      : N64PSP_TEXGEN_SPHERICAL,
                                (size_t) 3);
     for (i = 0; i < 3; i++) {
-        outU[i] = ((float) tc[i].s / 65536.0f) * (float) sTexgenScaleS / 32.0f - (float) sTileUls[0] / 4.0f;
-        outV[i] = ((float) tc[i].t / 65536.0f) * (float) sTexgenScaleT / 32.0f - (float) sTileUlt[0] / 4.0f;
+        outU[i] = ((float) tc[i].s / 65536.0f) * 2.0f * width * scaleS - (float) sTileUls[0] / 4.0f;
+        outV[i] = ((float) tc[i].t / 65536.0f) * 2.0f * height * scaleT - (float) sTileUlt[0] / 4.0f;
     }
 }
 
@@ -603,7 +648,14 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     /* Generated coordinates come from the vertex normals instead of v.tc */
     if (sTileFmt[0] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
         if (s3dTexDirty) {
-            s3dTexEntry = psp_gfx_tex_get(sTileFmt[0], sTileSiz[0], sTileWidth[0], sTileHeight[0], 0, 0);
+            u32 variant = (psp_gfx_3d_needs_bake(sTileWidth[0], sTileHeight[0]) &&
+                           sFrameBakes < PSP_GFX_FRAME_BAKE_LIMIT)
+                              ? 2u
+                              : 0u;
+
+            s3dTexMirror = psp_gfx_tile_mirror(sTileCms[0]) | (psp_gfx_tile_mirror(sTileCmt[0]) << 1);
+            s3dTexEntry = psp_gfx_tex_get(sTileFmt[0], sTileSiz[0], sTileWidth[0], sTileHeight[0], 0, variant,
+                                          s3dTexMirror);
             s3dTexDirty = 0;
         }
         tex = s3dTexEntry;
@@ -685,11 +737,23 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             tri[k].u = texgenU[k];
             tri[k].v = texgenV[k];
         } else if (textured) {
-            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f - (float) sTileUls[0] / 4.0f;
-            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f - (float) sTileUlt[0] / 4.0f;
+            /* gSPTexture scale is 0.16 and applies to explicit coordinates too */
+            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f * ((float) sTexgenScaleS / 65536.0f) -
+                       (float) sTileUls[0] / 4.0f;
+            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f * ((float) sTexgenScaleT / 65536.0f) -
+                       (float) sTileUlt[0] / 4.0f;
         } else {
             tri[k].u = 0.0f;
             tri[k].v = 0.0f;
+        }
+        /* Mirrored axes are baked as a doubled tile */
+        if (textured) {
+            if (s3dTexMirror & 1) {
+                tri[k].u *= 2.0f;
+            }
+            if (s3dTexMirror & 2) {
+                tri[k].v *= 2.0f;
+            }
         }
         tri[k].color = r | (g << 8) | (b << 16) | (a << 24);
     }
@@ -714,6 +778,24 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.modulate = modulate;
     /* Destination term of 1 (G_BL_1) means the cycle is opaque */
     state.blend = ((sOtherModeL >> (psp_gfx_3d_final_cycle() ? 16 : 18)) & 3) != G_BL_1;
+    /* Mirror wrap is baked, so only clamp differs from the default */
+    state.wrapS = psp_gfx_tile_clamp(sTileCms[0]);
+    state.wrapT = psp_gfx_tile_clamp(sTileCmt[0]);
+    state.filter = ((sOtherModeH >> G_MDSFT_TEXTFILT) & 3) != G_TF_POINT;
+
+    {
+        /* Temporary: identify the generated/explicit UV state per draw */
+        static int sTexDiag;
+
+        if (textured && tex != NULL && sTexDiag < 16) {
+            sTexDiag++;
+            PspLog("[gfx] tx gen=%d w=%u h=%u sc=%u mir=%u bv=%d u=%d,%d,%d v=%d,%d,%d\n", texgen,
+                   (unsigned) sTileWidth[0], (unsigned) sTileHeight[0], (unsigned) sTexgenScaleS,
+                   (unsigned) s3dTexMirror, tex->variant, (int) (tri[0].u * 10.0f), (int) (tri[1].u * 10.0f),
+                   (int) (tri[2].u * 10.0f), (int) (tri[0].v * 10.0f), (int) (tri[1].v * 10.0f),
+                   (int) (tri[2].v * 10.0f));
+        }
+    }
     PspGfx_DrawTriangles3D(tri, 3, &state);
 }
 
@@ -862,36 +944,6 @@ static void psp_gfx_pool_full(u32 requested) {
     }
 }
 
-typedef struct {
-    u32 a, b, c, d;
-    u32 aa, ab, ac, ad;
-} PspCombineCycle;
-
-static PspCombineCycle psp_gfx_combine_cycle(int second) {
-    PspCombineCycle c;
-
-    if (second) {
-        c.a = (sCombineW0 >> 5) & 15;
-        c.b = (sCombineW1 >> 24) & 15;
-        c.c = sCombineW0 & 31;
-        c.d = (sCombineW1 >> 6) & 7;
-        c.aa = (sCombineW1 >> 21) & 7;
-        c.ab = (sCombineW1 >> 3) & 7;
-        c.ac = (sCombineW1 >> 18) & 7;
-        c.ad = sCombineW1 & 7;
-    } else {
-        c.a = (sCombineW0 >> 20) & 15;
-        c.b = (sCombineW1 >> 28) & 15;
-        c.c = (sCombineW0 >> 15) & 31;
-        c.d = (sCombineW1 >> 15) & 7;
-        c.aa = (sCombineW0 >> 12) & 7;
-        c.ab = (sCombineW1 >> 12) & 7;
-        c.ac = (sCombineW0 >> 9) & 7;
-        c.ad = (sCombineW1 >> 9) & 7;
-    }
-    return c;
-}
-
 static int psp_gfx_3d_shade_source(void) {
     PspCombineCycle c = psp_gfx_combine_cycle(psp_gfx_3d_final_cycle());
 
@@ -904,6 +956,99 @@ static int psp_gfx_3d_shade_source(void) {
         return PSP_GFX_SHADE_ENVIRONMENT;
     }
     return PSP_GFX_SHADE_VERTEX;
+}
+
+/* Combiner source as an 8 bit value. SHADE stays white because the GE
+ * multiplies the baked texel by the lit colour afterwards. */
+static int psp_gfx_3d_mux(u32 mux, int component, const int tex[4], const int combined[4]) {
+    switch (mux) {
+        case G_CCMUX_COMBINED:
+            return combined[component];
+        case G_CCMUX_TEXEL0:
+            return tex[component];
+        case G_CCMUX_PRIMITIVE:
+            return (sPrimColor8888 >> (component * 8)) & 255;
+        case G_CCMUX_SHADE:
+            return 255;
+        case G_CCMUX_ENVIRONMENT:
+            return (sEnvColor >> (component * 8)) & 255;
+        case G_CCMUX_COMBINED_ALPHA:
+            return combined[3];
+        case G_CCMUX_TEXEL0_ALPHA:
+            return tex[3];
+        case G_CCMUX_PRIMITIVE_ALPHA:
+            return (sPrimColor8888 >> 24) & 255;
+        case G_CCMUX_SHADE_ALPHA:
+            return 255;
+        case G_CCMUX_ENV_ALPHA:
+            return (sEnvColor >> 24) & 255;
+        default:
+            return (mux == G_CCMUX_0 || mux == G_ACMUX_0) ? 0 : 255;
+    }
+}
+
+/* Bake the first cycle into the tile, the GE applies the shade */
+static u16 psp_gfx_3d_bake_texel(u16 pixel, const PspCombineCycle* c) {
+    int tex[4];
+    int combined[4] = { 0, 0, 0, 0 };
+    int result[4];
+    int i;
+    u16 out = 0;
+
+    for (i = 0; i < 4; i++) {
+        tex[i] = ((pixel >> (i * 4)) & 15) * 17;
+    }
+    for (i = 0; i < 4; i++) {
+        int a;
+        int b;
+        int factor;
+        int d;
+
+        if (i == 3) {
+            a = psp_gfx_3d_mux(c->aa, 3, tex, combined);
+            b = psp_gfx_3d_mux(c->ab, 3, tex, combined);
+            factor = psp_gfx_3d_mux(c->ac, 3, tex, combined);
+            d = psp_gfx_3d_mux(c->ad, 3, tex, combined);
+        } else {
+            a = psp_gfx_3d_mux(c->a, i, tex, combined);
+            b = psp_gfx_3d_mux(c->b, i, tex, combined);
+            factor = psp_gfx_3d_mux(c->c & 15u, i, tex, combined);
+            d = psp_gfx_3d_mux(c->d, i, tex, combined);
+        }
+        result[i] = ((a - b) * factor) / 255 + d;
+        if (result[i] < 0) {
+            result[i] = 0;
+        }
+        if (result[i] > 255) {
+            result[i] = 255;
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        out |= (u16) ((result[i] >> 4) << (i * 4));
+    }
+    return out;
+}
+
+/* Baking duplicates a tile per combiner variant, so keep it to the small
+ * environment maps and shading ramps that actually need it */
+#define PSP_GFX_BAKE_MAX_SIZE 128
+
+/* Plain texel or texel times a constant can stay on the fast GU paths */
+static int psp_gfx_3d_needs_bake(u32 width, u32 height) {
+    PspCombineCycle c;
+
+    if (width == 0 || height == 0 || width > PSP_GFX_BAKE_MAX_SIZE || height > PSP_GFX_BAKE_MAX_SIZE) {
+        return 0;
+    }
+    c = psp_gfx_combine_cycle(0);
+    if (c.a == c.b && c.d == G_CCMUX_TEXEL0) {
+        return 0;
+    }
+    if (c.a == G_CCMUX_TEXEL0 && c.b == G_CCMUX_COMBINED && c.d == G_CCMUX_COMBINED &&
+        (c.c == G_CCMUX_SHADE || c.c == G_CCMUX_PRIMITIVE || c.c == G_CCMUX_ENVIRONMENT)) {
+        return 0;
+    }
+    return 1;
 }
 
 static int psp_gfx_combine_value(u32 mux, int component, int multiplier, const int tex[4], const int combined[4]) {
@@ -1006,7 +1151,7 @@ static u32 psp_gfx_texture_style(u32* tint, int* modulate) {
     return 1;
 }
 
-static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant) {
+static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32 tile, u32 variant, u32 mirror) {
     PspTexEntry* e;
     const u8* src = psp_gfx_tex_source(sLoadAddr);
     u32 srcW = sLoadBlock ? width : (sLoadW << sLoadSiz) >> siz;
@@ -1019,6 +1164,9 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
 
     u32 potW;
     u32 potH;
+    u32 bakedW = (mirror & 1) ? width * 2 : width;
+    u32 bakedH = (mirror & 2) ? height * 2 : height;
+    PspCombineCycle bakeCycle;
     u32 count;
     u32 i;
     u32 x;
@@ -1027,19 +1175,20 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     if (src == NULL || width == 0 || height == 0 || width > 512 || height > 512 || srcW == 0) {
         return NULL;
     }
+    bakeCycle = psp_gfx_combine_cycle(0);
     for (i = 0; i < sTexEntryCount; i++) {
         e = &sTexEntries[i];
         if (e->addr == sLoadAddr && e->fmt == fmt && e->siz == siz && e->srcW == srcW && e->width == width &&
             e->height == height && e->srcX == srcX && e->srcY == srcY && e->paletteKey == paletteKey &&
-            e->variant == variant &&
+            e->variant == variant && e->mirror == mirror &&
             (!variant || (e->prim == sPrimColor8888 && e->env == sEnvColor && e->combine0 == sCombineW0 &&
                           e->combine1 == sCombineW1 && e->mode == sOtherModeH && e->lod == sPrimLodFrac))) {
             e->stamp = sFrameStamp;
             return e;
         }
     }
-    potW = psp_gfx_next_pow2(width);
-    potH = psp_gfx_next_pow2(height);
+    potW = psp_gfx_next_pow2(bakedW);
+    potH = psp_gfx_next_pow2(bakedH);
     if (potW < 8) {
         potW = 8;
     }
@@ -1081,6 +1230,7 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     e->native = PspGfx_TextureByteOrder(src);
     e->paletteKey = paletteKey;
     e->variant = variant;
+    e->mirror = mirror;
     e->combine0 = sCombineW0;
     e->combine1 = sCombineW1;
     e->mode = sOtherModeH;
@@ -1091,15 +1241,30 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     e->potH = potH;
     e->stamp = sFrameStamp;
     sTexDecodeCount++;
+    if (variant == 2) {
+        sFrameBakes++;
+    }
     /* Each queued texture starts on a cache line */
     e->pixels = &sTexPool[sTexPoolUsed];
     sTexPoolUsed += count;
     for (y = 0; y < potH; y++) {
         for (x = 0; x < potW; x++) {
-            e->pixels[y * potW + x] =
-                psp_gfx_decode_texel(e, src, x < width ? x : width - 1, y < height ? y : height - 1);
-            if (variant)
+            u32 sx = x < bakedW ? x : bakedW - 1;
+            u32 sy = y < bakedH ? y : bakedH - 1;
+
+            /* Mirrored axes repeat backwards over the second half */
+            if ((mirror & 1) && sx >= width) {
+                sx = bakedW - 1 - sx;
+            }
+            if ((mirror & 2) && sy >= height) {
+                sy = bakedH - 1 - sy;
+            }
+            e->pixels[y * potW + x] = psp_gfx_decode_texel(e, src, (s32) sx, (s32) sy);
+            if (variant == 2) {
+                e->pixels[y * potW + x] = psp_gfx_3d_bake_texel(e->pixels[y * potW + x], &bakeCycle);
+            } else if (variant) {
                 e->pixels[y * potW + x] = psp_gfx_combine_texel(e->pixels[y * potW + x]);
+            }
         }
     }
     return e;
@@ -1151,7 +1316,7 @@ static void psp_gfx_texrect(const Gfx* cur) {
         du *= 0.25f;
     }
     variant = psp_gfx_texture_style(&tint, &modulate);
-    e = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile], tile, variant);
+    e = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile], tile, variant, 0);
     if (e != NULL) {
         int flip = (w0 >> 24) == G_TEXRECTFLIP;
         float u1 = u0 + du * (flip ? y1 - y0 : x1 - x0);
@@ -1321,6 +1486,8 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sTileSiz[tile] = siz;
                 sTileTmem[tile] = w0 & 511;
                 sTilePalette[tile] = (w1 >> 20) & 15;
+                sTileCmt[tile] = (w1 >> 18) & 3;
+                sTileCms[tile] = (w1 >> 8) & 3;
                 s3dTexDirty = 1;
                 break;
             }
@@ -1361,6 +1528,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 break;
             case G_SETENVCOLOR:
                 sEnvColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
+                s3dTexDirty = 1;
                 break;
             case G_LOADBLOCK:
             case G_LOADTILE:
@@ -1455,11 +1623,14 @@ static void psp_gfx_walk(const Gfx* dl) {
                 sPrimLodFrac = w0 & 255;
                 sPrimColor = (u16) (((a >> 4) << 12) | ((b >> 4) << 8) | ((g >> 4) << 4) | (r >> 4));
                 sPrimColor8888 = r | (g << 8) | (b << 16) | (a << 24);
+                s3dTexDirty = 1;
                 break;
             }
             case G_SETCOMBINE:
                 sCombineW0 = w0;
                 sCombineW1 = w1;
+                /* The tile bake depends on the combiner and its constants */
+                s3dTexDirty = 1;
                 break;
             case G_SETSCISSOR:
                 PspGfx_SetScissor((s32) (_SHIFTR(w0, 12, 12) >> 2), (s32) (_SHIFTR(w0, 0, 12) >> 2),
@@ -1514,6 +1685,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         psp_gfx_mat_identity(sProjection);
         psp_gfx_mat_identity(sMP);
         sProjectionPerspective = 0;
+        sFrameBakes = 0;
         sModelViewDepth = 0;
         sProjectionDepth = 0;
         sViewport.vp.vscale[0] = 240 * 4;

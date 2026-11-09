@@ -672,26 +672,260 @@ static void test_3d_texgen(void) {
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
     gSPNumLights(p++, NUMLIGHTS_1);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetTextureFilter(p++, G_TF_BILERP);
     gDPSetCombineMode(p++, G_CC_MODULATEIA, G_CC_MODULATEIA);
     gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
     gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
-    gSPTexture(p++, 0x2000, 0x2000, 0, G_TX_RENDERTILE, G_ON);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
     gSPVertex(p++, vtx, 3, 0);
     gSP1Triangle(p++, 0, 1, 2, 0);
     run(p);
 
     assert(sTri3Count == 3);
     assert(sTexgenCalls == 1);
-    /* 16.16 sphere coordinate * scale >> (16 + 5) gives texels */
-    assert(fabsf(sTri3[0].u - 16.0f) < 0.01f);
-    assert(fabsf(sTri3[0].v - 8.0f) < 0.01f);
-    assert(fabsf(sTri3[2].u - 16.0f) < 0.01f);
+    /* One texture width spans the sphere at full gSPTexture scale */
+    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+    assert(fabsf(sTri3[2].u - 2.0f) < 0.01f);
+    assert(sTri3State.filter == 1);
 
     p = sCommands;
     sProjectionPerspective = 0;
     sProjectionSet = 0;
     gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
     gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
+    run(p);
+}
+
+static void test_3d_two_cycle_texture(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        vtx[i].v.tc[0] = (s16) (i * 32);
+        vtx[i].v.tc[1] = 0;
+        vtx[i].v.cn[0] = 0;
+        vtx[i].v.cn[1] = 0;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+    }
+
+    /* Cycle 1 samples, cycle 2 passes: the machine body pattern */
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
+    gSPNumLights(p++, NUMLIGHTS_1);
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineLERP(p++, TEXEL0, 0, SHADE, 0, COMBINED, 0, SHADE, 0, TEXEL0, 0, SHADE, 0, COMBINED, 0, SHADE,
+                      0);
+    gDPSetRenderMode(p++, G_RM_PASS, G_RM_ZB_OPA_SURF2);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3State.texturePixels != NULL);
+    assert(sTri3State.modulate == 1);
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    run(p);
+}
+
+static void test_3d_mirror_wrap(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        vtx[i].v.tc[0] = 32; /* one texel */
+        vtx[i].v.tc[1] = 32;
+        vtx[i].v.cn[0] = 0;
+        vtx[i].v.cn[1] = 0;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+    }
+
+    /* S mirrors, T clamps */
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, G_TX_MIRROR, G_TX_CLAMP, 0, 0, 0,
+                        0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3State.texturePixels != NULL);
+    assert(sTri3State.wrapS == 0 && sTri3State.wrapT == 1);
+    /* Mirrored S doubles the baked tile, so the coordinate doubles too */
+    assert(sTri3State.texWidth == 32);
+    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+
+    /* MIRROR|CLAMP is a bitfield and clamps: no bake, no doubling */
+    sTri3Count = 0;
+    p = sCommands;
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, G_TX_MIRROR | G_TX_CLAMP,
+                        G_TX_MIRROR | G_TX_CLAMP, 0, 0, 0, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3State.wrapS == 1 && sTri3State.wrapT == 1);
+    assert(sTri3State.texWidth == 16);
+    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    run(p);
+}
+
+static void test_3d_uv_scale(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        vtx[i].v.tc[0] = 64; /* two texels */
+        vtx[i].v.tc[1] = 32; /* one texel */
+        vtx[i].v.cn[0] = 0;
+        vtx[i].v.cn[1] = 0;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+    }
+
+    /* Half scale applies to explicit coordinates too, like the landmine decal */
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
+    gSPTexture(p++, 0x8000, 0x8000, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 0.5f) < 0.01f);
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+    run(p);
+}
+
+static void test_3d_env_lerp_bake(void) {
+    static Vtx vtx[3];
+    static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
+    static const u8 i4[8] = { 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88 };
+    u16 texel;
+    Gfx* p;
+    int i;
+
+    sViewport = vp;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1.0f;
+    sProjectionPerspective = 1;
+    sProjectionSet = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_mul(sMP, sModelView, sProjection);
+    psp_gfx_update_viewport_projection();
+
+    for (i = 0; i < 3; i++) {
+        vtx[i].v.ob[0] = (s16) (i * 10);
+        vtx[i].v.ob[1] = 0;
+        vtx[i].v.ob[2] = -100;
+        vtx[i].v.tc[0] = 0;
+        vtx[i].v.tc[1] = 0;
+        vtx[i].v.cn[0] = 0;
+        vtx[i].v.cn[1] = 127;
+        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[3] = 255;
+    }
+
+    /* Machine body: lerp from the paint colour toward the texel by its intensity */
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
+    gSPNumLights(p++, NUMLIGHTS_1);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineLERP(p++, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0,
+                      ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0,
+                      ENVIRONMENT);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gDPSetEnvColor(p++, 0, 0, 255, 255);
+    gDPLoadTextureBlock_4b(p++, i4, G_IM_FMT_I, 4, 4, 0, 0, 0, 4, 4, 0, 0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Count == 3);
+    assert(sTri3State.texturePixels != NULL);
+    texel = sTri3State.texturePixels[0];
+    /* The paint survives: blue leads, and it is not the raw grey texel */
+    assert(((texel >> 8) & 15) > ((texel >> 0) & 15));
+    assert(!(texel == 0x8888));
+
+    p = sCommands;
+    sProjectionPerspective = 0;
+    sProjectionSet = 0;
+    gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
     run(p);
 }
 
@@ -743,6 +977,10 @@ int main(void) {
     test_perspective_y();
     test_3d_no_zbuffer();
     test_3d_texgen();
+    test_3d_two_cycle_texture();
+    test_3d_mirror_wrap();
+    test_3d_uv_scale();
+    test_3d_env_lerp_bake();
     test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");

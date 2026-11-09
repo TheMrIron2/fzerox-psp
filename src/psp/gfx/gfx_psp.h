@@ -42,6 +42,11 @@ typedef struct {
     int modulate;
     /* 1 = alpha blend source over destination, 0 = opaque */
     int blend;
+    /* 1 = clamp, 0 = repeat */
+    int wrapS;
+    int wrapT;
+    /* 1 = bilinear, 0 = nearest */
+    int filter;
 } PspGfxDrawState;
 
 int PspGfx_Init(void);
