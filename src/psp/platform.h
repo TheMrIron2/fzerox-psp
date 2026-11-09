@@ -13,6 +13,8 @@ void PspPlatform_PollInput(OSContPad* pads);
 void PspPlatform_RunGfxTask(OSTask* task);
 void PspPlatform_RunAudioTask(OSTask* task);
 void PspPlatform_Log(const char* message);
+/* Debug: true while the SELECT button is held */
+int PspPlatform_DiagKey(void);
 
 u32 PspPlatform_GetViCount(void);
 u32 PspPlatform_GetGfxTaskCount(void);

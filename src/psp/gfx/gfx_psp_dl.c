@@ -14,6 +14,7 @@
 #define PSP_TEX_MIN_HEIGHT 8
 
 extern u32 gSegments[16];
+extern int PspPlatform_DiagKey(void);
 
 extern u8 D_1000000[];
 extern u8 D_2000000[];
@@ -126,6 +127,9 @@ static u32 sOtherModeL;
 static int sProjectionSet;
 static u32 sProjectionSerial;
 static u32 sModelViewSerial;
+/* Render tile from gSPTexture, multi-material models use several */
+static u32 sTexRenderTile;
+
 /* gSPTexture scale, only used by generated texture coordinates */
 static u32 sTexgenScaleS = 0xFFFF;
 static u32 sTexgenScaleT = 0xFFFF;
@@ -464,6 +468,11 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
 static PspTexEntry* s3dTexEntry;
 static u32 s3dTexMirror;
 static int s3dTexDirty = 1;
+/* Temporary texture diagnostics, captured for the frame SELECT is pressed */
+static int sTexDiag;
+static int sDiagLogging;
+static int sDiagArmed = 1;
+
 /* Baked variants decode per draw; cap the work a frame can spend on them */
 #define PSP_GFX_FRAME_BAKE_LIMIT 64
 static u32 sFrameBakes;
@@ -590,6 +599,57 @@ enum {
     PSP_GFX_SHADE_ENVIRONMENT,
 };
 
+/* (TEXEL0 - C) * f + C lerps the texel toward a constant colour, which
+ * GU_TFX_BLEND expresses when the vertex colour is C and f is the texel
+ * alpha. I4 ramps make the texel itself an equally good factor. */
+static int psp_gfx_3d_lerp_mux(void) {
+    PspCombineCycle c = psp_gfx_combine_cycle(0);
+
+    if (c.b != c.d || (c.b != G_CCMUX_ENVIRONMENT && c.b != G_CCMUX_PRIMITIVE)) {
+        return -1;
+    }
+    if (c.a == G_CCMUX_TEXEL0 || c.c == G_CCMUX_TEXEL0 || c.c == G_CCMUX_TEXEL0_ALPHA) {
+        return (int) c.b;
+    }
+    return -1;
+}
+
+/* Constant alpha from the first cycle, or -1 when it depends on the texel */
+static int psp_gfx_3d_const_alpha(void) {
+    PspCombineCycle c = psp_gfx_combine_cycle(0);
+    u32 mux[4];
+    int v[4];
+    int i;
+
+    mux[0] = c.aa;
+    mux[1] = c.ab;
+    mux[2] = c.ac;
+    mux[3] = c.ad;
+    for (i = 0; i < 4; i++) {
+        switch (mux[i]) {
+            case G_ACMUX_TEXEL0:
+            case G_ACMUX_TEXEL1:
+                return -1;
+            case G_ACMUX_PRIMITIVE:
+                v[i] = (int) ((sPrimColor8888 >> 24) & 255);
+                break;
+            case G_ACMUX_SHADE:
+                v[i] = 255;
+                break;
+            case G_ACMUX_ENVIRONMENT:
+                v[i] = (int) ((sEnvColor >> 24) & 255);
+                break;
+            case G_ACMUX_PRIM_LOD_FRAC:
+                v[i] = (int) sPrimLodFrac;
+                break;
+            default:
+                v[i] = 0;
+                break;
+        }
+    }
+    return ((v[0] - v[1]) * v[2]) / 255 + v[3];
+}
+
 static int psp_gfx_3d_shade_source(void);
 static int psp_gfx_3d_needs_bake(u32 width, u32 height);
 static u16 psp_gfx_3d_bake_texel(u16 pixel, const PspCombineCycle* c);
@@ -602,8 +662,9 @@ static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
     n64psp_texcoord_s10_5 tc[3];
     float scaleS = (float) sTexgenScaleS / 65536.0f;
     float scaleT = (float) sTexgenScaleT / 65536.0f;
-    float width = (float) sTileWidth[0];
-    float height = (float) sTileHeight[0];
+    u32 tile = sTexRenderTile;
+    float width = (float) sTileWidth[tile];
+    float height = (float) sTileHeight[tile];
     int i;
 
     for (i = 0; i < 3; i++) {
@@ -618,8 +679,8 @@ static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
                                                                      : N64PSP_TEXGEN_SPHERICAL,
                                (size_t) 3);
     for (i = 0; i < 3; i++) {
-        outU[i] = ((float) tc[i].s / 65536.0f) * 2.0f * width * scaleS - (float) sTileUls[0] / 4.0f;
-        outV[i] = ((float) tc[i].t / 65536.0f) * 2.0f * height * scaleT - (float) sTileUlt[0] / 4.0f;
+        outU[i] = ((float) tc[i].s / 65536.0f) * 2.0f * width * scaleS - (float) sTileUls[tile] / 4.0f;
+        outV[i] = ((float) tc[i].t / 65536.0f) * 2.0f * height * scaleT - (float) sTileUlt[tile] / 4.0f;
     }
 }
 
@@ -632,6 +693,10 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     int modulate = 1;
     int lit = (sGeometryMode & G_LIGHTING) && sNumLights > 0;
     int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit;
+    int lerpMux;
+    int texFunc = 0;
+    int constAlpha = 255;
+    u32 tile;
     int shadeSource;
     u32 shadeColor = 0;
     float texgenU[3];
@@ -646,16 +711,19 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     idx[2] = i2;
 
     /* Generated coordinates come from the vertex normals instead of v.tc */
-    if (sTileFmt[0] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
+    lerpMux = psp_gfx_3d_lerp_mux();
+    tile = sTexRenderTile;
+    if (sTileFmt[tile] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
         if (s3dTexDirty) {
-            u32 variant = (psp_gfx_3d_needs_bake(sTileWidth[0], sTileHeight[0]) &&
-                           sFrameBakes < PSP_GFX_FRAME_BAKE_LIMIT)
-                              ? 2u
-                              : 0u;
+            u32 variant;
 
-            s3dTexMirror = psp_gfx_tile_mirror(sTileCms[0]) | (psp_gfx_tile_mirror(sTileCmt[0]) << 1);
-            s3dTexEntry = psp_gfx_tex_get(sTileFmt[0], sTileSiz[0], sTileWidth[0], sTileHeight[0], 0, variant,
-                                          s3dTexMirror);
+            variant = (!lerpMux && psp_gfx_3d_needs_bake(sTileWidth[tile], sTileHeight[tile]) &&
+                       sFrameBakes < PSP_GFX_FRAME_BAKE_LIMIT)
+                          ? 2u
+                          : 0u;
+            s3dTexMirror = psp_gfx_tile_mirror(sTileCms[tile]) | (psp_gfx_tile_mirror(sTileCmt[tile]) << 1);
+            s3dTexEntry = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile], tile,
+                                          variant, s3dTexMirror);
             s3dTexDirty = 0;
         }
         tex = s3dTexEntry;
@@ -696,7 +764,12 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
 
     shadeSource = psp_gfx_3d_shade_source();
-    if (shadeSource == PSP_GFX_SHADE_PRIMITIVE) {
+    if (lerpMux >= 0) {
+        /* GU blends the texel with the vertex colour by the texel alpha */
+        shadeColor = (lerpMux == G_CCMUX_PRIMITIVE) ? sPrimColor8888 : sEnvColor;
+        texFunc = 2;
+        constAlpha = psp_gfx_3d_const_alpha();
+    } else if (shadeSource == PSP_GFX_SHADE_PRIMITIVE) {
         shadeColor = sPrimColor8888;
     } else if (shadeSource == PSP_GFX_SHADE_ENVIRONMENT) {
         shadeColor = sEnvColor;
@@ -709,12 +782,7 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
         u32 b;
         u32 a;
 
-        if (shadeSource != PSP_GFX_SHADE_VERTEX) {
-            r = shadeColor & 0xFF;
-            g = (shadeColor >> 8) & 0xFF;
-            b = (shadeColor >> 16) & 0xFF;
-            a = (shadeColor >> 24) & 0xFF;
-        } else if (lit) {
+        if (lit) {
             r = psp_gfx_remap_light(sLitOutput[k].x);
             g = psp_gfx_remap_light(sLitOutput[k].y);
             b = psp_gfx_remap_light(sLitOutput[k].z);
@@ -730,6 +798,18 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             b = (c >> 16) & 0xFF;
             a = (c >> 24) & 0xFF;
         }
+        if (lerpMux >= 0) {
+            /* Blend colour is the paint faded by the shade */
+            r = ((shadeColor & 0xFF) * r) / 255;
+            g = (((shadeColor >> 8) & 0xFF) * g) / 255;
+            b = (((shadeColor >> 16) & 0xFF) * b) / 255;
+            a = (constAlpha >= 0) ? (u32) constAlpha : 255u;
+        } else if (shadeSource != PSP_GFX_SHADE_VERTEX) {
+            r = shadeColor & 0xFF;
+            g = (shadeColor >> 8) & 0xFF;
+            b = (shadeColor >> 16) & 0xFF;
+            a = (shadeColor >> 24) & 0xFF;
+        }
         tri[k].x = (float) v->v.ob[0];
         tri[k].y = (float) v->v.ob[1];
         tri[k].z = (float) v->v.ob[2];
@@ -737,11 +817,9 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             tri[k].u = texgenU[k];
             tri[k].v = texgenV[k];
         } else if (textured) {
-            /* gSPTexture scale is 0.16 and applies to explicit coordinates too */
-            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f * ((float) sTexgenScaleS / 65536.0f) -
-                       (float) sTileUls[0] / 4.0f;
-            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f * ((float) sTexgenScaleT / 65536.0f) -
-                       (float) sTileUlt[0] / 4.0f;
+            /* The gSPTexture scale only drives generated coordinates */
+            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f - (float) sTileUls[tile] / 4.0f;
+            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f - (float) sTileUlt[tile] / 4.0f;
         } else {
             tri[k].u = 0.0f;
             tri[k].v = 0.0f;
@@ -776,24 +854,22 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.texWidth = textured ? (s32) tex->potW : 0;
     state.texHeight = textured ? (s32) tex->potH : 0;
     state.modulate = modulate;
+    state.texFunc = textured ? texFunc : 0;
     /* Destination term of 1 (G_BL_1) means the cycle is opaque */
     state.blend = ((sOtherModeL >> (psp_gfx_3d_final_cycle() ? 16 : 18)) & 3) != G_BL_1;
     /* Mirror wrap is baked, so only clamp differs from the default */
-    state.wrapS = psp_gfx_tile_clamp(sTileCms[0]);
-    state.wrapT = psp_gfx_tile_clamp(sTileCmt[0]);
+    state.wrapS = psp_gfx_tile_clamp(sTileCms[tile]);
+    state.wrapT = psp_gfx_tile_clamp(sTileCmt[tile]);
     state.filter = ((sOtherModeH >> G_MDSFT_TEXTFILT) & 3) != G_TF_POINT;
 
     {
-        /* Temporary: identify the generated/explicit UV state per draw */
-        static int sTexDiag;
-
-        if (textured && tex != NULL && sTexDiag < 16) {
+        /* Temporary: capture the draw state for one frame per SELECT press */
+        if (sDiagLogging && textured && tex != NULL && sTexDiag < 32) {
             sTexDiag++;
-            PspLog("[gfx] tx gen=%d w=%u h=%u sc=%u mir=%u bv=%d u=%d,%d,%d v=%d,%d,%d\n", texgen,
-                   (unsigned) sTileWidth[0], (unsigned) sTileHeight[0], (unsigned) sTexgenScaleS,
-                   (unsigned) s3dTexMirror, tex->variant, (int) (tri[0].u * 10.0f), (int) (tri[1].u * 10.0f),
-                   (int) (tri[2].u * 10.0f), (int) (tri[0].v * 10.0f), (int) (tri[1].v * 10.0f),
-                   (int) (tri[2].v * 10.0f));
+            PspLog("[gfx] tx tf=%d lit=%d tile=%u fmt=%u w=%u h=%u cmb=%08x/%08x col=%08x px=%04x\n", texFunc, lit,
+                   (unsigned) tile, (unsigned) sTileFmt[tile], (unsigned) sTileWidth[tile],
+                   (unsigned) sTileHeight[tile], (unsigned) sCombineW0, (unsigned) sCombineW1,
+                   (unsigned) tri[0].color, (unsigned) tex->pixels[0]);
         }
     }
     PspGfx_DrawTriangles3D(tri, 3, &state);
@@ -825,9 +901,16 @@ static const u8* psp_gfx_tex_source(u32 addr) {
     if (addr == 0) {
         return NULL;
     }
-    /* Low values are N64 physical addresses (e.g. the framebuffer) */
-    if (addr < 0x100000) {
+    /* N64 RDRAM is mirrored in gPspN64Ram */
+    if (addr < PSP_N64RAM_SIZE) {
         return gPspN64Ram + addr;
+    }
+    if (addr >= 0x80000000u && addr < 0x80000000u + PSP_N64RAM_SIZE) {
+        return gPspN64Ram + (addr & 0x1FFFFFFFu);
+    }
+    /* Unresolved segment address: never dereference it */
+    if (addr >= 0x01000000u && addr < 0x08800000u) {
+        return NULL;
     }
     return (const u8*) addr;
 }
@@ -1592,7 +1675,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 break;
             }
             case G_TEXTURE:
-                /* gSPTexture scale for generated coordinates */
+                sTexRenderTile = (w0 >> 8) & 7;
                 sTexgenScaleS = (w1 >> 16) & 0xFFFF;
                 sTexgenScaleT = w1 & 0xFFFF;
                 break;
@@ -1671,6 +1754,17 @@ static void psp_gfx_walk(const Gfx* dl) {
 
 void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
     int first = (sDrawCount == 0);
+    int diagKey = PspPlatform_DiagKey();
+
+    if (!diagKey) {
+        sDiagArmed = 1;
+        sDiagLogging = 0;
+    } else if (sDiagArmed) {
+        sDiagArmed = 0;
+        sTexDiag = 0;
+        sDiagLogging = 1;
+        PspLog("[gfx] diag press\n");
+    }
 
     (void) size;
 
@@ -1686,6 +1780,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
         psp_gfx_mat_identity(sMP);
         sProjectionPerspective = 0;
         sFrameBakes = 0;
+
         sModelViewDepth = 0;
         sProjectionDepth = 0;
         sViewport.vp.vscale[0] = 240 * 4;

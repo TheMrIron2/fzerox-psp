@@ -18,6 +18,9 @@ typedef double f64;
 #include "src/psp/gfx/gfx_psp_dl.c"
 
 u32 gSegments[16];
+int PspPlatform_DiagKey(void) {
+    return 0;
+}
 u8 gPspN64Ram[0x40000];
 u8 D_1000000[0x40000];
 u8 D_2000000[0x40000];
@@ -740,7 +743,7 @@ static void test_3d_two_cycle_texture(void) {
 
     assert(sTri3Count == 3);
     assert(sTri3State.texturePixels != NULL);
-    assert(sTri3State.modulate == 1);
+    assert(sTri3State.texFunc == 0);
 
     p = sCommands;
     sProjectionPerspective = 0;
@@ -846,7 +849,8 @@ static void test_3d_uv_scale(void) {
         vtx[i].v.cn[3] = 255;
     }
 
-    /* Half scale applies to explicit coordinates too, like the landmine decal */
+    /* Explicit coordinates ignore the gSPTexture scale, which only drives
+     * generated ones; the tuning screen sets it to 2600 and would collapse them */
     p = sCommands;
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
@@ -859,8 +863,8 @@ static void test_3d_uv_scale(void) {
     run(p);
 
     assert(sTri3Count == 3);
-    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
-    assert(fabsf(sTri3[0].v - 0.5f) < 0.01f);
+    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
 
     p = sCommands;
     sProjectionPerspective = 0;
@@ -874,7 +878,6 @@ static void test_3d_env_lerp_bake(void) {
     static Vtx vtx[3];
     static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
     static const u8 i4[8] = { 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88 };
-    u16 texel;
     Gfx* p;
     int i;
 
@@ -893,20 +896,19 @@ static void test_3d_env_lerp_bake(void) {
         vtx[i].v.ob[2] = -100;
         vtx[i].v.tc[0] = 0;
         vtx[i].v.tc[1] = 0;
-        vtx[i].v.cn[0] = 0;
-        vtx[i].v.cn[1] = 127;
-        vtx[i].v.cn[2] = 0;
+        vtx[i].v.cn[0] = 255;
+        vtx[i].v.cn[1] = 255;
+        vtx[i].v.cn[2] = 255;
         vtx[i].v.cn[3] = 255;
     }
 
     /* Machine body: lerp from the paint colour toward the texel by its intensity */
     p = sCommands;
-    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING);
-    gSPNumLights(p++, NUMLIGHTS_1);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
-    gDPSetCombineLERP(p++, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0,
-                      ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0,
-                      ENVIRONMENT);
+    /* Alpha muxes all zero, like the machine's highlight pass */
+    gDPSetCombineLERP(p++, TEXEL0, ENVIRONMENT, TEXEL0_ALPHA, ENVIRONMENT, 0, 0, 0, 0, TEXEL0, ENVIRONMENT,
+                      TEXEL0_ALPHA, ENVIRONMENT, 0, 0, 0, 0);
     gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
     gDPSetEnvColor(p++, 0, 0, 255, 255);
     gDPLoadTextureBlock_4b(p++, i4, G_IM_FMT_I, 4, 4, 0, 0, 0, 4, 4, 0, 0);
@@ -917,10 +919,12 @@ static void test_3d_env_lerp_bake(void) {
 
     assert(sTri3Count == 3);
     assert(sTri3State.texturePixels != NULL);
-    texel = sTri3State.texturePixels[0];
-    /* The paint survives: blue leads, and it is not the raw grey texel */
-    assert(((texel >> 8) & 15) > ((texel >> 0) & 15));
-    assert(!(texel == 0x8888));
+    /* The GE blends the raw texel with the paint colour, so the tile stays raw */
+    assert(sTri3State.texFunc == 2);
+    assert(sTri3State.texturePixels[0] == 0x8888);
+    /* Blend colour is the paint faded by the shade; unlit white vertices keep it blue.
+     * A zero combiner alpha must stay zero so the pass does not cover the body. */
+    assert(sTri3[0].color == 0x00FF0000u);
 
     p = sCommands;
     sProjectionPerspective = 0;

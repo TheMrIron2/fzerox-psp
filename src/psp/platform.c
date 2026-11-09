@@ -17,6 +17,8 @@ static OSMesg sViMsg;
 static u32 sViRetraceCount = 1;
 static u32 sViRetraceCounter;
 static volatile u32 sViCount;
+/* Sampled on the input thread; the renderer only reads this flag */
+static volatile int sDiagKey;
 static SceUID sViThreadId = -1;
 static volatile u32 sGfxTaskCount;
 static volatile u32 sAudioTaskCount;
@@ -132,6 +134,11 @@ void PspPlatform_PollInput(OSContPad* pads) {
     pads[0].button = button;
     pads[0].stick_x = psp_stick_axis((s32) data.Lx - 128);
     pads[0].stick_y = psp_stick_axis(128 - (s32) data.Ly);
+    sDiagKey = (data.Buttons & PSP_CTRL_SELECT) != 0;
+}
+
+int PspPlatform_DiagKey(void) {
+    return sDiagKey;
 }
 
 void PspPlatform_RunGfxTask(OSTask* task) {
