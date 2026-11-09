@@ -12,6 +12,13 @@ static u8 sVertexMemory[512] __attribute__((aligned(16)));
 static float sScaleU;
 static float sScaleV;
 static int sScaleCalls;
+static int sTestShadeModel = -1;
+static int sShadeCalls;
+
+void sceGuShadeModel(int mode) {
+    sTestShadeModel = mode;
+    sShadeCalls++;
+}
 
 void sceGuTexScale(float u, float v) {
     sScaleU = u;
@@ -72,6 +79,7 @@ static void test_3d_texture_units(void) {
     PspGfxVertex3D vertices[3];
     PspGfxVertex3D* submitted = (PspGfxVertex3D*) sVertexMemory;
     int calls;
+    int shadeCalls;
 
     memset(&state, 0, sizeof(state));
     memset(vertices, 0, sizeof(vertices));
@@ -79,16 +87,29 @@ static void test_3d_texture_units(void) {
     state.texturePixels = sTestFrame;
     state.texWidth = 16;
     state.texHeight = 32;
+    state.smoothShade = 1;
     vertices[0].u = 16.0f;
     vertices[0].v = 32.0f;
     sGuReady = 1;
     PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sTestShadeModel == GU_SMOOTH);
+    shadeCalls = sShadeCalls;
     /* One image width and height must span one repeat in the GE */
     assert(submitted[0].u * sScaleU == 1.0f);
     assert(submitted[0].v * sScaleV == 1.0f);
     calls = sScaleCalls;
     PspGfx_DrawTriangles3D(vertices, 3, &state);
     assert(sScaleCalls == calls);
+    assert(sShadeCalls == shadeCalls);
+
+    state.smoothShade = 0;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sTestShadeModel == GU_FLAT);
+    assert(sShadeCalls == shadeCalls + 1);
+    state.smoothShade = 1;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sTestShadeModel == GU_SMOOTH);
+    assert(sShadeCalls == shadeCalls + 2);
 
     state.texWidth = 64;
     state.texHeight = 16;

@@ -36,6 +36,7 @@ static int sDepthTestEnabled;
 static int sDepthWriteEnabled;
 static int sCullEnabled;
 static int sCullFront;
+static int sShadeModel = -1;
 
 /* Cached 3D texture binding */
 static int sTexBoundValid;
@@ -185,6 +186,7 @@ void PspGfx_BeginFrame(void) {
     sDepthWriteEnabled = 0;
     sCullEnabled = 0;
     sCullFront = 0;
+    sShadeModel = -1;
 }
 
 void PspGfx_Present(void) {
@@ -337,6 +339,7 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
 
 void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
     PspGfxVertex3D* out;
+    int shadeModel;
 
     if (!sGuReady || vertices == NULL || count == 0 || (count % 3) != 0 || state == NULL ||
         state->projection == NULL || (state->cullFront && state->cullBack)) {
@@ -344,6 +347,11 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
     }
 
     psp_gfx_gu_viewport(0);
+    shadeModel = state->smoothShade ? GU_SMOOTH : GU_FLAT;
+    if (sShadeModel != shadeModel) {
+        sceGuShadeModel(shadeModel);
+        sShadeModel = shadeModel;
+    }
 
     if (!sMatrixValid || sProjection != state->projection || sProjectionSerial != state->projectionSerial) {
         sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4*) state->projection);

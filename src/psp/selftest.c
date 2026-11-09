@@ -99,7 +99,7 @@ void PspSelfTest_Run(void) {
 void PspSelfTest_Gfx3D(void) {
     static float sProjection[4][4];
     static float sModelview[4][4];
-    PspGfxDrawState state;
+    PspGfxDrawState state = { 0 };
     PspGfxVertex3D triangle[3];
     int frame;
     int i;
@@ -147,6 +147,7 @@ void PspSelfTest_Gfx3D(void) {
     state.depthWrite = 1;
     state.cullFront = 0;
     state.cullBack = 0;
+    state.smoothShade = 1;
 
     for (frame = 0; frame < 180; frame++) {
         float angle = (float) frame * (6.2831853f / 180.0f);

@@ -528,7 +528,7 @@ static void test_3d_triangle(void) {
     vtx[2].v.cn[3] = 255;
 
     sTri3Count = 0;
-    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_CULL_BACK);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
     gDPSetRenderMode(p++, Z_CMP | Z_UPD, Z_CMP | Z_UPD);
     gSPVertex(p++, vtx, 3, 0);
     gSPModifyVertex(p++, 0, G_MWO_POINT_ST, 0x12345678);
@@ -544,8 +544,15 @@ static void test_3d_triangle(void) {
     assert(sTri3State.depthTest == 1);
     assert(sTri3State.depthWrite == 1);
     assert(sTri3State.cullBack == 1 && sTri3State.cullFront == 0);
+    assert(sTri3State.smoothShade == 1);
     assert(sTri3State.projection == &sViewportProjection[0][0]);
     assert(sVtx[0].v.tc[0] == 0x1234 && sVtx[0].v.tc[1] == 0x5678);
+
+    p = sCommands;
+    gSPClearGeometryMode(p++, G_SHADING_SMOOTH);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3State.smoothShade == 0);
 
     /* Clear 3D state so later 2D tests stay on the software path */
     p = sCommands;
@@ -1042,6 +1049,66 @@ static void test_3d_material_tiles(void) {
     sProjectionSet = sProjectionPerspective = 0;
 }
 
+static void test_3d_blend_color_outline(void) {
+    static Vtx vertices[3];
+    Gfx* p = sCommands;
+    u32 decoded = sTexDecodeCount;
+    int i;
+
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sProjection);
+    psp_gfx_mat_identity(sModelView);
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.cn[2] = 255;
+        vertices[i].v.cn[3] = 255;
+    }
+    gSPClearGeometryMode(p++, G_LIGHTING | G_TEXTURE_GEN);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, 0, G_ON);
+    gDPSetBlendColor(p++, 0, 0, 0, 255);
+    /* The enlarged tuning silhouette selects the constant blend colour */
+    gDPSetRenderMode(p++, Z_CMP | CVG_DST_FULL | ZMODE_OPA |
+                             GBL_c1(G_BL_CLR_BL, G_BL_0, G_BL_CLR_BL, G_BL_1),
+                    Z_CMP | CVG_DST_FULL | ZMODE_OPA |
+                             GBL_c2(G_BL_CLR_BL, G_BL_0, G_BL_CLR_BL, G_BL_1));
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3Calls == 1);
+    assert(sTexDecodeCount == decoded);
+    assert(sTri3State.texturePixels == NULL);
+    assert(sTri3State.depthTest == 1 && sTri3State.depthWrite == 0);
+    assert(sTri3State.blend == 0);
+    for (i = 0; i < 3; i++) {
+        assert(sTri3[i].color == 0xFF000000u);
+    }
+
+    p = sCommands;
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetBlendColor(p++, 24, 48, 96, 255);
+    gDPSetRenderMode(p++, G_RM_PASS, Z_CMP | CVG_DST_FULL | ZMODE_OPA |
+                         GBL_c2(G_BL_CLR_IN, G_BL_0, G_BL_CLR_BL, G_BL_1));
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].color == 0xFF603018u);
+    assert(sTri3State.texturePixels == NULL);
+    assert(sTri3State.blend == 0);
+
+    p = sCommands;
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    /* The following body draw must recover its own material and shade */
+    assert(sTri3State.texturePixels != NULL);
+    assert(sTri3[0].color == 0xFFFF0000u);
+    assert(sTri3State.depthWrite == 1);
+    sProjectionSet = sProjectionPerspective = 0;
+}
+
 static void test_mtx_decode(void) {
     Mtx m;
     float mf[4][4];
@@ -1095,6 +1162,7 @@ int main(void) {
     test_3d_uv_scale();
     test_3d_env_lerp_bake();
     test_3d_material_tiles();
+    test_3d_blend_color_outline();
     test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");

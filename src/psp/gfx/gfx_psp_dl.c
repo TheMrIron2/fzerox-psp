@@ -123,6 +123,7 @@ static u32 sCombineW0;
 static u32 sCombineW1;
 static u32 sFillColor;
 static u32 sEnvColor = 0xFFFFFFFF;
+static u32 sBlendColor;
 static u32 sPrimLodFrac;
 /* Current RDP colour image; 0 means the game never bound one (draw to screen) */
 static u32 sColorTarget;
@@ -601,7 +602,17 @@ enum {
     PSP_GFX_SHADE_VERTEX = 0,
     PSP_GFX_SHADE_PRIMITIVE,
     PSP_GFX_SHADE_ENVIRONMENT,
+    PSP_GFX_SHADE_BLEND,
 };
+
+static int psp_gfx_3d_blend_color_only(void) {
+    u32 shift = psp_gfx_3d_final_cycle() ? 2 : 0;
+    u32 sourceFactor = (sOtherModeL >> (26 - shift)) & 3;
+    u32 destinationColor = (sOtherModeL >> (22 - shift)) & 3;
+    u32 destinationFactor = (sOtherModeL >> (18 - shift)) & 3;
+
+    return sourceFactor == G_BL_0 && destinationColor == G_BL_CLR_BL && destinationFactor == G_BL_1;
+}
 
 static int psp_gfx_3d_shade_source(void);
 static int psp_gfx_3d_needs_bake(u32 width, u32 height);
@@ -644,7 +655,8 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     PspTexEntry* tex = NULL;
     int textured = 0;
     int modulate = 1;
-    int lit = (sGeometryMode & G_LIGHTING) && sNumLights > 0;
+    int blendColorOnly = psp_gfx_3d_blend_color_only();
+    int lit = !blendColorOnly && (sGeometryMode & G_LIGHTING) && sNumLights > 0;
     int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit;
     int traceLit = lit && sLitTraceState == 0;
     int texFunc = 0;
@@ -669,7 +681,7 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
 
     /* Generated coordinates come from the vertex normals instead of v.tc */
     tile = sTexRenderTile;
-    if (sTileFmt[tile] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
+    if (!blendColorOnly && sTileFmt[tile] != 0xFF && psp_gfx_3d_combiner_uses_texture()) {
         if (s3dTexDirty) {
             u32 variant;
 
@@ -724,7 +736,10 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
 
     shadeSource = psp_gfx_3d_shade_source();
-    if (textured && tex->variant == 2) {
+    if (blendColorOnly) {
+        shadeSource = PSP_GFX_SHADE_BLEND;
+        shadeColor = sBlendColor;
+    } else if (textured && tex->variant == 2) {
         shadeSource = PSP_GFX_SHADE_VERTEX;
         texFunc = psp_gfx_3d_final_cycle() ? 0 : 1;
     } else if (shadeSource == PSP_GFX_SHADE_PRIMITIVE) {
@@ -793,6 +808,7 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
     state.cullFront = (sGeometryMode & G_CULL_FRONT) != 0;
     state.cullBack = (sGeometryMode & G_CULL_BACK) != 0;
+    state.smoothShade = (sGeometryMode & G_SHADING_SMOOTH) != 0;
     state.texturePixels = textured ? tex->pixels : NULL;
     state.texWidth = textured ? (s32) tex->potW : 0;
     state.texHeight = textured ? (s32) tex->potH : 0;
@@ -1554,6 +1570,9 @@ static void psp_gfx_walk(const Gfx* dl) {
             case G_SETENVCOLOR:
                 sEnvColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
                 s3dTexDirty = 1;
+                break;
+            case G_SETBLENDCOLOR:
+                sBlendColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
                 break;
             case G_LOADBLOCK:
             case G_LOADTILE: {

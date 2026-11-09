@@ -35,6 +35,7 @@ typedef struct {
     int depthWrite;
     int cullFront;
     int cullBack;
+    int smoothShade;
     /* Decoded RGBA4444 tile, power-of-two size; NULL means untextured */
     const u16* texturePixels;
     s32 texWidth;
