@@ -339,7 +339,7 @@ void Game_ThreadEntry(void* entry) {
 
     // Setup memory
     Segment_SetAddress(0, 0);
-    Segment_SetAddress(2, gUnkBssVramStart);
+    Segment_SetPhysicalAddress(2, (uintptr_t) &D_80225800);
     Segment_SetAddress(8, gSegment16C8A0VramStart);
     Segment_SetAddress(3, gSegment17B1E0VramStart);
 #ifdef EXPANSION_KIT

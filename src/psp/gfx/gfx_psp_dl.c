@@ -86,6 +86,7 @@ static int sProjectionDepth;
 static int sProjectionPerspective;
 static Vp sViewport;
 static Vtx sVtx[PSP_GFX_MAX_VTX];
+static float sVtxTexcoord[PSP_GFX_MAX_VTX][2];
 
 /* RDP state used by the 2D path */
 static u32 sTexAddr;
@@ -137,9 +138,9 @@ static u32 sModelViewSerial;
 /* Render tile from gSPTexture, multi-material models use several */
 static u32 sTexRenderTile;
 
-/* gSPTexture scale, only used by generated texture coordinates */
-static u32 sTexgenScaleS = 0xFFFF;
-static u32 sTexgenScaleT = 0xFFFF;
+/* Explicit texture coordinates capture scale when vertices load */
+static u32 sTextureScaleS = 0xFFFF;
+static u32 sTextureScaleT = 0xFFFF;
 
 /* Projection with the N64 viewport folded in, fed to the GE */
 static float sViewportProjection[4][4] __attribute__((aligned(16)));
@@ -624,8 +625,8 @@ static n64psp_packed_vertex sTexgenVertices[3];
 
 static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
     n64psp_texcoord_s10_5 tc[3];
-    float scaleS = (float) sTexgenScaleS / 65536.0f;
-    float scaleT = (float) sTexgenScaleT / 65536.0f;
+    float scaleS = (float) sTextureScaleS / 65536.0f;
+    float scaleT = (float) sTextureScaleT / 65536.0f;
     u32 tile = sTexRenderTile;
     float width = (float) sTileWidth[tile];
     float height = (float) sTileHeight[tile];
@@ -784,9 +785,8 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             tri[k].u = texgenU[k];
             tri[k].v = texgenV[k];
         } else if (textured) {
-            /* The gSPTexture scale only drives generated coordinates */
-            tri[k].u = (float) (s16) v->v.tc[0] / 32.0f - (float) sTileUls[tile] / 4.0f;
-            tri[k].v = (float) (s16) v->v.tc[1] / 32.0f - (float) sTileUlt[tile] / 4.0f;
+            tri[k].u = sVtxTexcoord[idx[k]][0] / 32.0f - (float) sTileUls[tile] / 4.0f;
+            tri[k].v = sVtxTexcoord[idx[k]][1] / 32.0f - (float) sTileUlt[tile] / 4.0f;
         } else {
             tri[k].u = 0.0f;
             tri[k].v = 0.0f;
@@ -1395,6 +1395,8 @@ static void psp_gfx_walk(const Gfx* dl) {
 
                 for (i = 0; i < n && (v0 + i) < PSP_GFX_MAX_VTX; i++) {
                     sVtx[v0 + i] = src[i];
+                    sVtxTexcoord[v0 + i][0] = (float) src[i].v.tc[0] * (float) sTextureScaleS / 65536.0f;
+                    sVtxTexcoord[v0 + i][1] = (float) src[i].v.tc[1] * (float) sTextureScaleT / 65536.0f;
                 }
                 break;
             }
@@ -1659,8 +1661,8 @@ static void psp_gfx_walk(const Gfx* dl) {
                     s3dTexDirty = 1;
                 }
                 sTexRenderTile = (w0 >> 8) & 7;
-                sTexgenScaleS = (w1 >> 16) & 0xFFFF;
-                sTexgenScaleT = w1 & 0xFFFF;
+                sTextureScaleS = (w1 >> 16) & 0xFFFF;
+                sTextureScaleT = w1 & 0xFFFF;
                 break;
             case G_MODIFYVTX: {
                 u32 vtx = (w0 & 0xFFFF) >> 1;
@@ -1669,6 +1671,9 @@ static void psp_gfx_walk(const Gfx* dl) {
                 if (vtx < PSP_GFX_MAX_VTX && where == G_MWO_POINT_ST) {
                     sVtx[vtx].v.tc[0] = (w1 >> 16) & 0xFFFF;
                     sVtx[vtx].v.tc[1] = w1 & 0xFFFF;
+                    /* ST edits already contain the texture scale */
+                    sVtxTexcoord[vtx][0] = (float) (s16) (w1 >> 16);
+                    sVtxTexcoord[vtx][1] = (float) (s16) w1;
                 }
                 break;
             }

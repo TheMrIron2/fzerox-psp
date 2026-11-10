@@ -43,6 +43,7 @@ static PspGfxVertex3D sTri3[3];
 static PspGfxDrawState sTri3State;
 static u32 sTri3Count;
 static PspGfxDrawState sTri3States[2048];
+static u32 sTri3Colors[2048];
 static u32 sTri3Calls;
 
 int PspGfx_Init(void) {
@@ -60,6 +61,7 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
 }
 void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
     assert(sTri3Calls < 2048);
+    sTri3Colors[sTri3Calls] = vertices[0].color;
     sTri3States[sTri3Calls++] = *state;
     sTri3Count = count;
     if (count >= 3) {
@@ -869,22 +871,62 @@ static void test_3d_uv_scale(void) {
         vtx[i].v.cn[3] = 255;
     }
 
-    /* Explicit coordinates ignore the gSPTexture scale, which only drives
-     * generated ones; the tuning screen sets it to 2600 and would collapse them */
+    /* Course loads halve S while retaining almost all of T */
     p = sCommands;
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
     gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
     gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
-    gSPTexture(p++, 0x8000, 0x8000, 0, G_TX_RENDERTILE, G_ON);
+    gSPTexture(p++, 0x8000, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
     gSPVertex(p++, vtx, 3, 0);
     gSP1Triangle(p++, 0, 1, 2, 0);
     run(p);
 
     assert(sTri3Count == 3);
-    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
+    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
     assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+
+    p = sCommands;
+    gSPTexture(p++, 0x2000, 0x4000, 0, G_TX_RENDERTILE, G_ON);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(fabsf(sTri3[0].u - 1.0f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
+
+    p = sCommands;
+    gSPModifyVertex(p++, 0, G_MWO_POINT_ST, 0xFFC0FFE0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].u == -2.0f && sTri3[0].v == -1.0f);
+
+    p = sCommands;
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].u == 0.25f && sTri3[0].v == 0.25f);
+
+    p = sCommands;
+    gSPTexture(p++, 0, 0, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].u == 0 && sTri3[0].v == 0);
+
+    p = sCommands;
+    gSPModifyVertex(p++, 0, G_MWO_POINT_ST, 0x00400020);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].u == 2.0f && sTri3[0].v == 1.0f);
+
+    vtx[0].v.tc[0] = -64;
+    vtx[0].v.tc[1] = -32;
+    p = sCommands;
+    gSPTexture(p++, 0x8000, 0x8000, 0, G_TX_RENDERTILE, G_ON);
+    gSPVertex(p++, vtx, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3[0].u == -1.0f && sTri3[0].v == -0.5f);
 
     p = sCommands;
     sProjectionPerspective = 0;
@@ -1109,6 +1151,53 @@ static void test_3d_blend_color_outline(void) {
     sProjectionSet = sProjectionPerspective = 0;
 }
 
+static void test_road_gadget_depth_states(void) {
+    static Vtx vertices[3];
+    Gfx* p = sCommands;
+    u32 fogMode = CVG_DST_FULL | ZMODE_OPA | ALPHA_CVG_SEL | FORCE_BL;
+    int i;
+
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sProjection);
+    sProjection[2][3] = -1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_update_viewport_projection();
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.ob[0] = (s16) (i * 10);
+        vertices[i].v.ob[2] = -100;
+    }
+    gSPClearGeometryMode(p++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE);
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineMode(p++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+    /* The road material requests updates without comparison */
+    gDPSetRenderMode(p++, Z_UPD | fogMode | G_RM_FOG_SHADE_A,
+                    Z_UPD | fogMode | GBL_c2(G_BL_CLR_FOG, G_BL_A_SHADE, G_BL_CLR_IN, G_BL_1MA));
+    gSPVertex(p++, vertices, 3, 0);
+    gDPSetPrimColor(p++, 0, 0, 255, 0, 0, 255);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gDPSetPrimColor(p++, 0, 0, 0, 255, 0, 255);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gDPSetRenderMode(p++, Z_CMP | fogMode | G_RM_FOG_SHADE_A,
+                    Z_CMP | fogMode | GBL_c2(G_BL_CLR_FOG, G_BL_A_SHADE, G_BL_CLR_IN, G_BL_1MA));
+    gDPSetPrimColor(p++, 0, 0, 255, 255, 255, 255);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gDPSetRenderMode(p++, Z_CMP | Z_UPD | fogMode | G_RM_FOG_SHADE_A,
+                    Z_CMP | Z_UPD | fogMode | GBL_c2(G_BL_CLR_FOG, G_BL_A_SHADE, G_BL_CLR_IN, G_BL_1MA));
+    gDPSetPrimColor(p++, 0, 0, 0, 0, 255, 255);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+
+    assert(sTri3Calls == 4);
+    assert(!sTri3States[0].depthTest && sTri3States[0].depthWrite);
+    assert(!sTri3States[1].depthTest && sTri3States[1].depthWrite);
+    assert(sTri3States[2].depthTest && !sTri3States[2].depthWrite);
+    assert(sTri3States[3].depthTest && sTri3States[3].depthWrite);
+    assert(sTri3Colors[0] == 0xFF0000FF && sTri3Colors[1] == 0xFF00FF00);
+    assert(sTri3Colors[2] == 0xFFFFFFFF && sTri3Colors[3] == 0xFFFF0000);
+    sProjectionSet = sProjectionPerspective = 0;
+}
+
 static void test_mtx_decode(void) {
     Mtx m;
     float mf[4][4];
@@ -1163,6 +1252,7 @@ int main(void) {
     test_3d_env_lerp_bake();
     test_3d_material_tiles();
     test_3d_blend_color_outline();
+    test_road_gadget_depth_states();
     test_mtx_decode();
     test_boot_framebuffer();
     puts("PSP HUD display list tests passed");

@@ -115,14 +115,16 @@ $(PSP_SFO):
 	@mkdir -p $(dir $@)
 	$(MKSFOEX) -d MEMSIZE=1 '$(PSP_TITLE)' $@
 
-$(PSP_ELF): $(O_FILES) $(N64PSP_ARCHIVES) Makefile src/psp/sources.mk
+$(PSP_ELF): $(O_FILES) $(N64PSP_ARCHIVES) $(N64PSP_STAMP) Makefile src/psp/sources.mk
 	@mkdir -p $(dir $@)
 	$(CC) $(O_FILES) $(LDFLAGS) $(N64PSP_ARCHIVES) $(PSP_LIBS) -o $@
 	$(PSP_FIXUP_IMPORTS) $@
 
 $(N64PSP_STAMP): FORCE
 	$(MAKE) -C $(N64PSP_DIR) BUILD_PSP=$(N64PSP_BUILD) PSP_CC=$(CC) PSP_AR=$(AR) $(N64PSP_TARGETS)
-	@touch $@
+	@for archive in $(N64PSP_ARCHIVES); do \
+		if [ ! -e "$@" ] || [ "$$archive" -nt "$@" ]; then touch "$@"; break; fi; \
+	done
 
 $(N64PSP_ARCHIVES): $(N64PSP_STAMP)
 

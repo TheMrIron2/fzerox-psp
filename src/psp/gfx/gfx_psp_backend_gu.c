@@ -2,6 +2,9 @@
 #include <pspgu.h>
 #include <pspge.h>
 #include <pspkernel.h>
+#include <math.h>
+#include <string.h>
+#include <n64psp/clip.h>
 
 #include "src/psp/gfx/gfx_psp.h"
 #include "src/psp/psp.h"
@@ -32,7 +35,10 @@ static const float* sProjection;
 static const float* sModelview;
 static u32 sProjectionSerial;
 static u32 sModelviewSerial;
+static n64psp_mat4f sClipProjection;
+static n64psp_mat4f sClipModelview;
 static int sDepthTestEnabled;
+static int sDepthFunction = -1;
 static int sDepthWriteEnabled;
 static int sCullEnabled;
 static int sCullFront;
@@ -92,6 +98,11 @@ static void psp_gfx_gu_viewport(int wide) {
     }
     width = wide ? (int) PSP_SCREEN_W : (int) (N64_SCREEN_W * s2dScaleX + 0.5f);
     sceGuViewport(2048, 2048, width, (int) PSP_SCREEN_H);
+    if (wide) {
+        sceGuDisable(GU_CLIP_PLANES);
+    } else {
+        sceGuEnable(GU_CLIP_PLANES);
+    }
     sViewportWide = wide;
 }
 
@@ -149,12 +160,14 @@ int PspGfx_Init(void) {
     sceGuDisable(GU_CULL_FACE);
     sceGuDisable(GU_TEXTURE_2D);
     sceGuDisable(GU_BLEND);
+    sceGuDisable(GU_CLIP_PLANES);
     sceGuFinish();
     sceGuSync(0, 0);
 
     sViewportWide = 1;
     sMatrixValid = 0;
     sDepthTestEnabled = 0;
+    sDepthFunction = GU_GEQUAL;
     /* BeginFrame issues GU_TRUE; track writes as disabled */
     sDepthWriteEnabled = 0;
     sCullEnabled = 0;
@@ -182,6 +195,7 @@ void PspGfx_BeginFrame(void) {
     sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
     sMatrixValid = 0;
     sDepthTestEnabled = 0;
+    sDepthFunction = -1;
     /* sceGuDepthMask(GU_TRUE) disabled writes above */
     sDepthWriteEnabled = 0;
     sCullEnabled = 0;
@@ -337,9 +351,109 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     sceGuDrawArray(GU_TRIANGLES, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 3, NULL, out);
 }
 
-void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
+static void psp_gfx_gu_submit(const PspGfxVertex3D* vertices, u32 count) {
     PspGfxVertex3D* out;
+
+    out = (PspGfxVertex3D*) sceGuGetMemory(count * sizeof(PspGfxVertex3D));
+    if (out == NULL) {
+        return;
+    }
+    memcpy(out, vertices, count * sizeof(*out));
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, count,
+                   NULL, out);
+}
+
+static PspGfxVertex3D psp_gfx_gu_interpolate(const PspGfxVertex3D vertices[3], const float weight[3], int smooth) {
+    PspGfxVertex3D out;
+    u32 channel;
+
+    out.x = vertices[0].x * weight[0] + vertices[1].x * weight[1] + vertices[2].x * weight[2];
+    out.y = vertices[0].y * weight[0] + vertices[1].y * weight[1] + vertices[2].y * weight[2];
+    out.z = vertices[0].z * weight[0] + vertices[1].z * weight[1] + vertices[2].z * weight[2];
+    out.u = vertices[0].u * weight[0] + vertices[1].u * weight[1] + vertices[2].u * weight[2];
+    out.v = vertices[0].v * weight[0] + vertices[1].v * weight[1] + vertices[2].v * weight[2];
+    out.color = vertices[2].color;
+    if (smooth) {
+        out.color = 0;
+        for (channel = 0; channel < 32; channel += 8) {
+            float value = ((vertices[0].color >> channel) & 255) * weight[0] +
+                          ((vertices[1].color >> channel) & 255) * weight[1] +
+                          ((vertices[2].color >> channel) & 255) * weight[2];
+
+            value = value < 0 ? 0 : value > 255 ? 255 : value;
+            out.color |= (u32) (value + 0.5f) << channel;
+        }
+    }
+    return out;
+}
+
+static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smooth) {
+    n64psp_vec4f positions[3];
+    n64psp_vec4f_pair transformed[3];
+    n64psp_vec4f clip[3];
+    u32 shared = 63;
+    int safe = 1;
+    u32 i;
+
+    for (i = 0; i < 3; i++) {
+        positions[i].x = vertices[i].x;
+        positions[i].y = vertices[i].y;
+        positions[i].z = vertices[i].z;
+        positions[i].w = 1.0f;
+    }
+    n64psp_mat4f_transform_vec4_chain2_batch(transformed, &sClipModelview, &sClipProjection, positions, 3);
+    for (i = 0; i < 3; i++) {
+        u32 code;
+
+        clip[i] = transformed[i].second;
+        if (!isfinite(clip[i].x) || !isfinite(clip[i].y) || !isfinite(clip[i].z) || !isfinite(clip[i].w)) {
+            return;
+        }
+        code = (clip[i].x < -clip[i].w) | ((clip[i].x > clip[i].w) << 1) |
+               ((clip[i].y < -clip[i].w) << 2) | ((clip[i].y > clip[i].w) << 3) |
+               ((clip[i].z < -clip[i].w) << 4) | ((clip[i].z > clip[i].w) << 5);
+        shared &= code;
+        /* Eight viewport half widths leave room inside the GE coordinate limit */
+        if (clip[i].w <= 0 || fabsf(clip[i].x) > 8.0f * clip[i].w ||
+            fabsf(clip[i].y) > 8.0f * clip[i].w || clip[i].z > clip[i].w) {
+            safe = 0;
+        }
+    }
+    if (shared != 0) {
+        return;
+    }
+    if (safe) {
+        /* The GE clips the near plane and keeps perspective interpolation */
+        psp_gfx_gu_submit(vertices, 3);
+    } else {
+        n64psp_clip_vertex clipped[N64PSP_CLIP_MAX_VERTICES];
+        PspGfxVertex3D polygon[N64PSP_CLIP_MAX_VERTICES];
+        PspGfxVertex3D triangles[(N64PSP_CLIP_MAX_VERTICES - 2) * 3];
+        size_t count = n64psp_clip_triangle(clipped, clip);
+        u32 emitted = 0;
+
+        for (i = 0; i < count; i++) {
+            if (!(clipped[i].clip.w > 0)) {
+                return;
+            }
+            polygon[i] = psp_gfx_gu_interpolate(vertices, clipped[i].weight, smooth);
+        }
+        for (i = 1; i + 1 < count; i++) {
+            triangles[emitted++] = polygon[0];
+            triangles[emitted++] = polygon[i];
+            triangles[emitted++] = polygon[i + 1];
+        }
+        if (emitted != 0) {
+            psp_gfx_gu_submit(triangles, emitted);
+        }
+    }
+}
+
+void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
     int shadeModel;
+    int depthEnabled;
+    int depthFunction;
+    u32 i;
 
     if (!sGuReady || vertices == NULL || count == 0 || (count % 3) != 0 || state == NULL ||
         state->projection == NULL || (state->cullFront && state->cullBack)) {
@@ -357,6 +471,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4*) state->projection);
         sProjection = state->projection;
         sProjectionSerial = state->projectionSerial;
+        memcpy(&sClipProjection, state->projection, sizeof(sClipProjection));
     }
     if (!sMatrixValid) {
         sceGuSetMatrix(GU_VIEW, &sIdentityMatrix);
@@ -366,17 +481,25 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
                                                           : &sIdentityMatrix);
         sModelview = state->modelview;
         sModelviewSerial = state->modelviewSerial;
+        memcpy(&sClipModelview, state->modelview != NULL ? state->modelview : (const float*) &sIdentityMatrix,
+               sizeof(sClipModelview));
     }
     sMatrixValid = 1;
 
-    if (sDepthTestEnabled != state->depthTest) {
-        if (state->depthTest) {
+    /* GE depth writes require an enabled test even when comparison is off */
+    depthEnabled = state->depthTest || state->depthWrite;
+    depthFunction = state->depthTest ? GU_GEQUAL : GU_ALWAYS;
+    if (sDepthTestEnabled != depthEnabled) {
+        if (depthEnabled) {
             sceGuEnable(GU_DEPTH_TEST);
-            sceGuDepthFunc(GU_GEQUAL);
         } else {
             sceGuDisable(GU_DEPTH_TEST);
         }
-        sDepthTestEnabled = state->depthTest;
+        sDepthTestEnabled = depthEnabled;
+    }
+    if (depthEnabled && sDepthFunction != depthFunction) {
+        sceGuDepthFunc(depthFunction);
+        sDepthFunction = depthFunction;
     }
     if (sDepthWriteEnabled != (state->depthWrite != 0)) {
         sceGuDepthMask(state->depthWrite ? GU_FALSE : GU_TRUE);
@@ -440,19 +563,9 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sTexBoundValid = 0;
     }
 
-    out = (PspGfxVertex3D*) sceGuGetMemory(count * sizeof(PspGfxVertex3D));
-    if (out == NULL) {
-        return;
+    for (i = 0; i < count; i += 3) {
+        psp_gfx_gu_clip_triangle(vertices + i, state->smoothShade);
     }
-    {
-        u32 i;
-
-        for (i = 0; i < count; i++) {
-            out[i] = vertices[i];
-        }
-    }
-    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, count,
-                   NULL, out);
 }
 
 int PspGfx_ReadFramebuffer(u16* pixels, s32 width, s32 height) {

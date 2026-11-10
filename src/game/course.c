@@ -6,6 +6,19 @@
 #include "fzx_camera.h"
 #include "fzx_segmentA.h"
 #include ASSET_HEADER(course_track_gfx.h)
+#ifdef PSP_FULL
+#include ASSET_HEADER(mute_city_textures.h)
+#include ASSET_HEADER(port_town_textures.h)
+#include ASSET_HEADER(big_blue_textures.h)
+#include ASSET_HEADER(sand_ocean_textures.h)
+#include ASSET_HEADER(devils_forest_textures.h)
+#include ASSET_HEADER(white_land_textures.h)
+#include ASSET_HEADER(sector_textures.h)
+#include ASSET_HEADER(red_canyon_textures.h)
+#include ASSET_HEADER(fire_field_textures.h)
+#include ASSET_HEADER(silence_textures.h)
+#include ASSET_HEADER(ending_venue_textures.h)
+#endif
 
 #define VERTEX_MODIFIED_ST(s, t) ((((s) << 15) & 0xFFFF0000) | ((t) &0xFFFF))
 
@@ -152,6 +165,41 @@ unk_800CF528 D_800CF868[] = {
     { D_8002008, 14.0f, 64, 4, 5, 1023, 32, 0xB60, 0xEA0, 0xF20, 0xFC0 }, // BORDERLESS_ROAD_1
     { D_8003008, 14.0f, 64, 4, 5, 1023, 32, 0xB60, 0xEA0, 0xF20, 0xFC0 }, // BORDERLESS_ROAD_2
 };
+
+#ifdef PSP_FULL
+#define COURSE_VENUE_TEXTURE_SET(suffix) \
+    { D_A001000_##suffix, D_A000000_##suffix, D_A002000_##suffix, D_A003000_##suffix, D_A004000_##suffix, \
+      D_A005000_##suffix, D_A006000_##suffix, D_A007000_##suffix, D_A008000_##suffix }
+
+static u16* sCourseVenueTextures[VENUE_ENDING + 1][9] = {
+    COURSE_VENUE_TEXTURE_SET(235130),
+    COURSE_VENUE_TEXTURE_SET(239A80),
+    COURSE_VENUE_TEXTURE_SET(23EC50),
+    COURSE_VENUE_TEXTURE_SET(243D90),
+    COURSE_VENUE_TEXTURE_SET(24A270),
+    COURSE_VENUE_TEXTURE_SET(2507F0),
+    COURSE_VENUE_TEXTURE_SET(255100),
+    COURSE_VENUE_TEXTURE_SET(259600),
+    COURSE_VENUE_TEXTURE_SET(25F360),
+    COURSE_VENUE_TEXTURE_SET(266C20),
+    COURSE_VENUE_TEXTURE_SET(26D780),
+};
+
+#undef COURSE_VENUE_TEXTURE_SET
+
+static void Course_SetVenueTextures(s32 venue) {
+    s32 i;
+
+    if (venue < VENUE_MUTE_CITY || venue > VENUE_ENDING) {
+        return;
+    }
+    for (i = 0; i < 7; i++) {
+        D_800CF528[i].texture = (s32) (uintptr_t) sCourseVenueTextures[venue][i];
+    }
+    D_800CF608[WALLED_ROAD_0].texture = (s32) (uintptr_t) sCourseVenueTextures[venue][7];
+    D_800CF868[BORDERLESS_ROAD_0].texture = (s32) (uintptr_t) sCourseVenueTextures[venue][8];
+}
+#endif
 
 unk_800CF528* D_800CF8C8[] = {
     D_800CF528, // TRACK_SHAPE_ROAD
@@ -329,6 +377,9 @@ s32 D_800CFA20[] = {
 };
 
 void func_8009CED0(s32 venue) {
+#ifdef PSP_FULL
+    Course_SetVenueTextures(venue);
+#endif
     switch (venue) {
         case VENUE_MUTE_CITY:
             D_800CF528[ROAD_2].textureScale = D_800CF528[ROAD_3].textureScale = D_800CF528[ROAD_4].textureScale =
