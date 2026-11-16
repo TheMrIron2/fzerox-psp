@@ -169,6 +169,8 @@ static int sFlxDirectionValid;
 static u8 sFlxTable[256];
 static float sFlxDirection[3];
 static u32 sFogColor;
+static s16 sFogMultiplier;
+static s16 sFogOffset;
 
 void PspGfx_SetMicrocode(const void* text) {
     sFlx = (u32) text == (u32) gspF3DFLX2_Rej_fifoTextStart;
@@ -700,6 +702,13 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit && !reflection;
     int traceLit = lit && sLitTraceState == 0;
     int texFunc = 0;
+    PspCombineCycle firstCycle = psp_gfx_combine_cycle(0);
+    int floorMix = !psp_gfx_3d_final_cycle() && firstCycle.a == G_CCMUX_PRIMITIVE &&
+                   firstCycle.b == G_CCMUX_TEXEL0 && firstCycle.c == G_CCMUX_SHADE &&
+                   firstCycle.d == G_CCMUX_TEXEL0 && firstCycle.aa == firstCycle.ab &&
+                   firstCycle.ad == G_ACMUX_SHADE;
+    int fog = (sGeometryMode & G_FOG) && ((sOtherModeL >> 30) & 3) == G_BL_CLR_FOG &&
+              ((sOtherModeL >> 26) & 3) == G_BL_A_SHADE;
     u32 tile;
     int shadeSource;
     u32 shadeColor = 0;
@@ -725,7 +734,7 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
         if (s3dTexDirty) {
             u32 variant;
 
-            variant = psp_gfx_3d_needs_bake(sTileWidth[tile], sTileHeight[tile]) ? 2u : 0u;
+            variant = !floorMix && psp_gfx_3d_needs_bake(sTileWidth[tile], sTileHeight[tile]) ? 2u : 0u;
             s3dTexMirror = psp_gfx_tile_mirror(sTileCms[tile]) | (psp_gfx_tile_mirror(sTileCmt[tile]) << 1);
             s3dTexEntry = psp_gfx_tex_get(sTileFmt[tile], sTileSiz[tile], sTileWidth[tile], sTileHeight[tile], tile,
                                           variant, s3dTexMirror);
@@ -785,6 +794,10 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
 
     shadeSource = psp_gfx_3d_shade_source();
+    if (floorMix && textured) {
+        texFunc = 1;
+        shadeSource = PSP_GFX_SHADE_VERTEX;
+    }
     if (blendColorOnly) {
         shadeSource = PSP_GFX_SHADE_BLEND;
         shadeColor = sBlendColor;
@@ -845,6 +858,20 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             b = (shadeColor >> 16) & 0xFF;
             a = (shadeColor >> 24) & 0xFF;
         }
+        if (floorMix && textured) {
+            a = v->v.cn[0];
+        } else if (fog) {
+            float x = v->v.ob[0];
+            float y = v->v.ob[1];
+            float z = v->v.ob[2];
+            float clipZ = x * sMP[0][2] + y * sMP[1][2] + z * sMP[2][2] + sMP[3][2];
+            float clipW = x * sMP[0][3] + y * sMP[1][3] + z * sMP[2][3] + sMP[3][3];
+            float ratio = clipW <= 0.001f ? -1.0f : clipZ / clipW;
+            float amount;
+            ratio = ratio < -1.0f ? -1.0f : ratio > 1.0f ? 1.0f : ratio;
+            amount = ratio * sFogMultiplier + sFogOffset;
+            a = amount < 0 ? 0 : amount > 255 ? 255 : (u32) amount;
+        }
         tri[k].x = (float) v->v.ob[0];
         tri[k].y = (float) v->v.ob[1];
         tri[k].z = (float) v->v.ob[2];
@@ -887,8 +914,8 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.wrapS = psp_gfx_tile_clamp(sTileCms[tile]);
     state.wrapT = psp_gfx_tile_clamp(sTileCmt[tile]);
     state.filter = ((sOtherModeH >> G_MDSFT_TEXTFILT) & 3) != G_TF_POINT;
-    state.reflection = reflection && ((sOtherModeL >> 30) & 3) == G_BL_CLR_FOG;
-    state.reflectionColor = sFogColor;
+    state.reflection = floorMix && textured ? 1 : fog || (reflection && ((sOtherModeL >> 30) & 3) == G_BL_CLR_FOG);
+    state.reflectionColor = floorMix && textured ? sPrimColor8888 : sFogColor;
     if (state.reflection) state.blend = 0;
 
     {
@@ -1740,6 +1767,9 @@ static void psp_gfx_walk(const Gfx* dl) {
                         sAmbientG = sLightSlots[sNumLights].g;
                         sAmbientB = sLightSlots[sNumLights].b;
                     }
+                } else if (index == G_MW_FOG) {
+                    sFogMultiplier = (s16) (w1 >> 16);
+                    sFogOffset = (s16) w1;
                 } else if (index == G_MW_LIGHTCOL) {
                     u32 slot = offset / 0x18;
 

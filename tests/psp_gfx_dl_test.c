@@ -1301,6 +1301,63 @@ static void test_rotating_sign_textures(void) {
     sProjectionSet = sProjectionPerspective = 0;
 }
 
+static void test_floor_and_course_fog(void) {
+    static u16 floorTexture[64 * 32];
+    static Vtx vertices[3];
+    Gfx* p = sCommands;
+    int i;
+
+    for (i = 0; i < 64 * 32; i++) floorTexture[i] = 0xf801;
+    PspGfx_SetTextureByteOrder(floorTexture, sizeof(floorTexture), 1);
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.ob[2] = i - 1;
+        vertices[i].v.cn[0] = vertices[i].v.cn[1] = vertices[i].v.cn[2] = i * 100;
+        vertices[i].v.cn[3] = 255;
+    }
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sModelView);
+    psp_gfx_mat_identity(sMP);
+    gSPClearGeometryMode(p++, G_LIGHTING | G_TEXTURE_GEN | G_FOG);
+    gSPSetGeometryMode(p++, G_SHADE | G_SHADING_SMOOTH);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetRenderMode(p++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+    gDPSetCombineLERP(p++, PRIMITIVE, TEXEL0, SHADE, TEXEL0, 0, 0, 0, SHADE,
+                      PRIMITIVE, TEXEL0, SHADE, TEXEL0, 0, 0, 0, SHADE);
+    gDPSetPrimColor(p++, 0, 0, 20, 40, 60, 0);
+    gDPLoadTextureBlock(p++, floorTexture, G_IM_FMT_RGBA, G_IM_SIZ_16b, 64, 32, 0,
+                        G_TX_WRAP, G_TX_WRAP, 6, 5, 0, 0);
+    gSPTexture(p++, 0xffff, 0xffff, 0, 0, G_ON);
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gSPEndDisplayList(p++);
+    sTri3Calls = 0;
+    PspGfx_RunDisplayList(sCommands, (p - sCommands) * sizeof(Gfx));
+    assert(sTri3State.reflection && sTri3State.reflectionColor == 0x003c2814);
+    assert(sTri3State.texFunc == 1 && !sTri3State.blend);
+    assert(sTri3State.texturePixels[0] == 0xf00f);
+    assert((sTri3[0].color >> 24) == 0 && (sTri3[1].color >> 24) == 100 &&
+           (sTri3[2].color >> 24) == 200);
+    PspGfx_EndFrame();
+
+    p = sCommands;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_FOG);
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineMode(p++, G_CC_BLENDRGBA, G_CC_BLENDRGBA);
+    gDPSetRenderMode(p++, Z_UPD | G_RM_FOG_SHADE_A,
+                    Z_UPD | GBL_c2(G_BL_CLR_FOG, G_BL_A_SHADE, G_BL_CLR_IN, G_BL_1MA));
+    gSPFogFactor(p++, 100, 120);
+    gDPSetFogColor(p++, 10, 20, 30, 255);
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3State.reflection && sTri3State.reflectionColor == 0xff1e140a);
+    assert(!sTri3State.blend && sTri3State.depthWrite && !sTri3State.depthTest);
+    assert((sTri3[0].color >> 24) == 20 && (sTri3[1].color >> 24) == 120 &&
+           (sTri3[2].color >> 24) == 220);
+    sGeometryMode &= ~G_FOG;
+    sProjectionSet = sProjectionPerspective = 0;
+}
+
 static void test_mtx_decode(void) {
     Mtx m;
     float mf[4][4];
@@ -1351,6 +1408,7 @@ int main(void) {
     test_3d_texgen();
     test_flx_reflection();
     test_rotating_sign_textures();
+    test_floor_and_course_fog();
     test_3d_two_cycle_texture();
     test_3d_mirror_wrap();
     test_3d_uv_scale();
