@@ -1257,6 +1257,50 @@ static void test_road_gadget_depth_states(void) {
     sProjectionSet = sProjectionPerspective = 0;
 }
 
+static void test_rotating_sign_textures(void) {
+    static u16 overhead[64 * 32];
+    static u16 nintex[64 * 32];
+    static Vtx vertices[3];
+    Gfx* p = sCommands;
+    int i;
+
+    for (i = 0; i < 64 * 32; i++) {
+        overhead[i] = 0xf801;
+        nintex[i] = 0x07c1;
+    }
+    PspGfx_SetTextureByteOrder(overhead, sizeof(overhead), 1);
+    PspGfx_SetTextureByteOrder(nintex, sizeof(nintex), 1);
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.cn[0] = vertices[i].v.cn[1] = vertices[i].v.cn[2] = vertices[i].v.cn[3] = 255;
+    }
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sModelView);
+    gSPClearGeometryMode(p++, G_LIGHTING | G_TEXTURE_GEN);
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_SHADING_SMOOTH);
+    gSPTexture(p++, 0xffff, 0xffff, 0, 0, G_ON);
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineMode(p++, G_CC_BLENDRGBA, G_CC_BLENDRGBA);
+    gDPSetRenderMode(p++, Z_CMP | Z_UPD | G_RM_FOG_SHADE_A,
+                    Z_CMP | Z_UPD | GBL_c2(G_BL_CLR_FOG, G_BL_A_SHADE, G_BL_CLR_IN, G_BL_1MA));
+    gDPLoadTextureBlock(p++, overhead, G_IM_FMT_RGBA, G_IM_SIZ_16b, 64, 32, 0,
+                        G_TX_WRAP, G_TX_CLAMP, 6, 5, G_TX_NOLOD, G_TX_NOLOD);
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gDPLoadTextureBlock(p++, nintex, G_IM_FMT_RGBA, G_IM_SIZ_16b, 64, 32, 0,
+                        G_TX_CLAMP, G_TX_CLAMP, 6, 5, G_TX_NOLOD, G_TX_NOLOD);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gSPEndDisplayList(p++);
+    sTri3Calls = 0;
+    PspGfx_RunDisplayList(sCommands, (p - sCommands) * sizeof(Gfx));
+    assert(sTri3Calls == 2);
+    assert(sTri3States[0].texturePixels && sTri3States[1].texturePixels);
+    assert(sTri3States[0].texturePixels[0] == 0xf00f);
+    assert(sTri3States[1].texturePixels[0] == 0xf0f0);
+    assert(sTri3States[0].wrapS == 0 && sTri3States[1].wrapS == 1);
+    PspGfx_EndFrame();
+    sProjectionSet = sProjectionPerspective = 0;
+}
+
 static void test_mtx_decode(void) {
     Mtx m;
     float mf[4][4];
@@ -1306,6 +1350,7 @@ int main(void) {
     test_3d_no_zbuffer();
     test_3d_texgen();
     test_flx_reflection();
+    test_rotating_sign_textures();
     test_3d_two_cycle_texture();
     test_3d_mirror_wrap();
     test_3d_uv_scale();

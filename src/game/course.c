@@ -7,6 +7,7 @@
 #include "fzx_segmentA.h"
 #include ASSET_HEADER(course_track_gfx.h)
 #ifdef PSP_FULL
+#include ASSET_HEADER(setup_gfx.h)
 #include ASSET_HEADER(mute_city_textures.h)
 #include ASSET_HEADER(port_town_textures.h)
 #include ASSET_HEADER(big_blue_textures.h)
@@ -169,9 +170,10 @@ unk_800CF528 D_800CF868[] = {
 #ifdef PSP_FULL
 #define COURSE_VENUE_TEXTURE_SET(suffix) \
     { D_A001000_##suffix, D_A000000_##suffix, D_A002000_##suffix, D_A003000_##suffix, D_A004000_##suffix, \
-      D_A005000_##suffix, D_A006000_##suffix, D_A007000_##suffix, D_A008000_##suffix }
+      D_A005000_##suffix, D_A006000_##suffix, D_A007000_##suffix, D_A008000_##suffix, \
+      D_A009000_##suffix, D_A00A000_##suffix }
 
-static u16* sCourseVenueTextures[VENUE_ENDING + 1][9] = {
+static u16* sCourseVenueTextures[VENUE_ENDING + 1][11] = {
     COURSE_VENUE_TEXTURE_SET(235130),
     COURSE_VENUE_TEXTURE_SET(239A80),
     COURSE_VENUE_TEXTURE_SET(23EC50),
@@ -198,6 +200,8 @@ static void Course_SetVenueTextures(s32 venue) {
     }
     D_800CF608[WALLED_ROAD_0].texture = (s32) (uintptr_t) sCourseVenueTextures[venue][7];
     D_800CF868[BORDERLESS_ROAD_0].texture = (s32) (uintptr_t) sCourseVenueTextures[venue][8];
+    D_3000590[1].words.w1 = (u32) (uintptr_t) sCourseVenueTextures[venue][9];
+    D_3000688[1].words.w1 = (u32) (uintptr_t) sCourseVenueTextures[venue][10];
 }
 #endif
 
