@@ -24,6 +24,14 @@ static int sDepthFunctionCalls;
 static int sDepthPixelActive;
 static float sPixelDepth;
 static u32 sPixelColor;
+static int sCaptureReflection;
+static int sReflectionDraws;
+static u32 sReflectionColors[2];
+static int sReflectionDepthMasks[2];
+static int sReflectionTextureEnabled;
+static int sReflectionTextureStates[2];
+static int sReflectionBlendEnabled;
+static int sReflectionBlendStates[2];
 
 void sceGuShadeModel(int mode) {
     sTestShadeModel = mode;
@@ -49,6 +57,13 @@ void sceGuDrawArray(int prim, int type, int count, const void* indices, const vo
     (void) prim; (void) indices;
     sDrawCalls++;
     sSubmittedCount = count;
+    if (sCaptureReflection) {
+        assert(sReflectionDraws < 2 && count == 3);
+        sReflectionColors[sReflectionDraws] = ((const PspGfxVertex3D*) vertices)[0].color;
+        sReflectionDepthMasks[sReflectionDraws] = sTestDepthMask;
+        sReflectionTextureStates[sReflectionDraws] = sReflectionTextureEnabled;
+        sReflectionBlendStates[sReflectionDraws++] = sReflectionBlendEnabled;
+    }
     if (sDepthPixelActive && !(type & GU_TRANSFORM_2D)) {
         const PspGfxVertex3D* triangle = vertices;
         float depth = (1.0f - triangle[0].z) * 0.5f;
@@ -89,10 +104,14 @@ void sceGuTexFlush(void) {}
 void sceGuEnable(int state) {
     if (state == GU_CLIP_PLANES) sClipPlanes = 1;
     if (state == GU_DEPTH_TEST) sTestDepthEnabled = 1;
+    if (state == GU_TEXTURE_2D) sReflectionTextureEnabled = 1;
+    if (state == GU_BLEND) sReflectionBlendEnabled = 1;
 }
 void sceGuDisable(int state) {
     if (state == GU_CLIP_PLANES) sClipPlanes = 0;
     if (state == GU_DEPTH_TEST) sTestDepthEnabled = 0;
+    if (state == GU_TEXTURE_2D) sReflectionTextureEnabled = 0;
+    if (state == GU_BLEND) sReflectionBlendEnabled = 0;
 }
 void sceGuDepthFunc(int function) {
     sTestDepthFunction = function;
@@ -365,6 +384,32 @@ static void test_ordered_road_depth(void) {
     sDepthPixelActive = 0;
 }
 
+static void test_reflection_pass(void) {
+    PspGfxDrawState state;
+    PspGfxVertex3D vertices[3] = {
+        { 0, 0, 0x4d204060, -0.5f, -0.5f, 0 },
+        { 0, 0, 0x80204060, 0.5f, -0.5f, 0 },
+        { 0, 0, 0xff204060, 0, 0.5f, 0 },
+    };
+    memset(&state, 0, sizeof(state));
+    state.projection = (const float*) &sIdentityMatrix;
+    state.texturePixels = sTestFrame;
+    state.texWidth = state.texHeight = 16;
+    state.depthTest = state.depthWrite = state.smoothShade = 1;
+    state.reflection = 1;
+    state.reflectionColor = 0xff785028;
+    sReflectionDraws = 0;
+    sCaptureReflection = 1;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    sCaptureReflection = 0;
+    assert(sReflectionDraws == 2);
+    assert(sReflectionColors[0] == 0x4d204060 && sReflectionColors[1] == 0x4d785028);
+    assert(sReflectionTextureStates[0] && !sReflectionTextureStates[1]);
+    assert(!sReflectionBlendStates[0] && sReflectionBlendStates[1]);
+    assert(sReflectionDepthMasks[0] == GU_FALSE && sReflectionDepthMasks[1] == GU_TRUE);
+    assert(sTestDepthMask == GU_FALSE);
+}
+
 int main(void) {
     int x, y;
 
@@ -391,6 +436,7 @@ int main(void) {
     test_3d_texture_units();
     test_3d_clipping();
     test_ordered_road_depth();
+    test_reflection_pass();
     puts("PSP GU framebuffer texture coordinate clipping and depth tests passed");
     return 0;
 }

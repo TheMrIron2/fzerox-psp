@@ -565,6 +565,31 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
 
     for (i = 0; i < count; i += 3) {
         psp_gfx_gu_clip_triangle(vertices + i, state->smoothShade);
+        if (state->reflection) {
+            PspGfxVertex3D overlay[3];
+            u32 j;
+
+            for (j = 0; j < 3; j++) {
+                overlay[j] = vertices[i + j];
+                overlay[j].color = (state->reflectionColor & 0x00ffffffu) |
+                                   (vertices[i + j].color & 0xff000000u);
+            }
+            sceGuDisable(GU_TEXTURE_2D);
+            sTexBoundValid = 0;
+            sceGuEnable(GU_BLEND);
+            sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+            sceGuDepthMask(GU_TRUE);
+            sDepthWriteEnabled = 0;
+            psp_gfx_gu_clip_triangle(overlay, state->smoothShade);
+            if (state->depthWrite) {
+                sceGuDepthMask(GU_FALSE);
+                sDepthWriteEnabled = 1;
+            }
+            sceGuDisable(GU_BLEND);
+            if (state->texturePixels != NULL) {
+                sceGuEnable(GU_TEXTURE_2D);
+            }
+        }
     }
 }
 

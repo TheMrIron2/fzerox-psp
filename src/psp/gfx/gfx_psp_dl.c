@@ -5,6 +5,7 @@
 #include "PR/gu.h"
 
 #include <math.h>
+#include <string.h>
 #include <n64psp/lighting.h>
 #include <n64psp/tnl.h>
 
@@ -18,6 +19,7 @@ extern int PspPlatform_DiagKey(void);
 
 extern u8 D_1000000[];
 extern u8 D_2000000[];
+extern u8 gspF3DFLX2_Rej_fifoTextStart[] __attribute__((weak));
 
 #define PSP_GFX_STUB_SIZE 0x40000u
 
@@ -160,6 +162,19 @@ static u8 sAmbientR;
 static u8 sAmbientG;
 static u8 sAmbientB;
 static int sNumLights;
+static float sGfxLookAt[2][3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f } };
+static int sFlx;
+static int sFlxTableValid;
+static int sFlxDirectionValid;
+static u8 sFlxTable[256];
+static float sFlxDirection[3];
+static u32 sFogColor;
+
+void PspGfx_SetMicrocode(const void* text) {
+    sFlx = (u32) text == (u32) gspF3DFLX2_Rej_fifoTextStart;
+    sFlxTableValid = 0;
+    sFlxDirectionValid = 0;
+}
 
 /* Lighting scratch */
 static n64psp_snorm8x4 sLitNormals[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
@@ -167,6 +182,9 @@ static n64psp_vec4f sLitOutput[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
 static n64psp_directional_lightf sLitLights[8] __attribute__((aligned(16)));
 static n64psp_vec4f sLitAmbient __attribute__((aligned(16)));
 static n64psp_mat4f sLitNormalMatrix __attribute__((aligned(16)));
+static const n64psp_mat4f sLightIdentity __attribute__((aligned(16))) = {
+    { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } }
+};
 
 /* The game's visible framebuffers are mapped pointers; offscreen clears such as
  * D_3000170 target raw physical addresses (0x400) that we cannot render to */
@@ -498,18 +516,30 @@ static void psp_gfx_build_light_defs(void) {
     int j;
 
     for (i = 0; i < sNumLights && i < 8; i++) {
-        sLitLights[i].direction.x = sLightSlots[i].x;
-        sLitLights[i].direction.y = sLightSlots[i].y;
-        sLitLights[i].direction.z = sLightSlots[i].z;
+        float x = sModelView[0][0] * sLightSlots[i].x + sModelView[0][1] * sLightSlots[i].y +
+                  sModelView[0][2] * sLightSlots[i].z;
+        float y = sModelView[1][0] * sLightSlots[i].x + sModelView[1][1] * sLightSlots[i].y +
+                  sModelView[1][2] * sLightSlots[i].z;
+        float z = sModelView[2][0] * sLightSlots[i].x + sModelView[2][1] * sLightSlots[i].y +
+                  sModelView[2][2] * sLightSlots[i].z;
+        float length = sqrtf(x * x + y * y + z * z);
+        if (length > 0.000001f) {
+            x /= length;
+            y /= length;
+            z /= length;
+        }
+        sLitLights[i].direction.x = x;
+        sLitLights[i].direction.y = y;
+        sLitLights[i].direction.z = z;
         sLitLights[i].direction.w = 0.0f;
         sLitLights[i].color.x = (float) sLightSlots[i].r;
         sLitLights[i].color.y = (float) sLightSlots[i].g;
         sLitLights[i].color.z = (float) sLightSlots[i].b;
         sLitLights[i].color.w = 0.0f;
     }
-    sLitAmbient.x = (float) sAmbientR;
-    sLitAmbient.y = (float) sAmbientG;
-    sLitAmbient.z = (float) sAmbientB;
+    sLitAmbient.x = (float) sLightSlots[sNumLights].r;
+    sLitAmbient.y = (float) sLightSlots[sNumLights].g;
+    sLitAmbient.z = (float) sLightSlots[sNumLights].b;
     sLitAmbient.w = 0.0f;
     for (i = 0; i < 4; i++) {
         for (j = 0; j < 4; j++) {
@@ -619,18 +649,23 @@ static int psp_gfx_3d_shade_source(void);
 static int psp_gfx_3d_needs_bake(u32 width, u32 height);
 static u16 psp_gfx_3d_bake_texel(u16 pixel, const PspCombineCycle* c);
 
-/* Generated coordinates: n64psp gives 16.16 of the [0,0.5] sphere, which
- * covers one texture width at full scale, then gSPTexture scales it */
 static n64psp_packed_vertex sTexgenVertices[3];
 
 static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
     n64psp_texcoord_s10_5 tc[3];
-    float scaleS = (float) sTextureScaleS / 65536.0f;
-    float scaleT = (float) sTextureScaleT / 65536.0f;
+    n64psp_mat4f lookMatrix;
     u32 tile = sTexRenderTile;
-    float width = (float) sTileWidth[tile];
-    float height = (float) sTileHeight[tile];
     int i;
+    int j;
+
+    lookMatrix = sLitNormalMatrix;
+    for (i = 0; i < 2; i++) {
+        for (j = 0; j < 3; j++) {
+            lookMatrix.m[1 - i][j] = sModelView[j][0] * sGfxLookAt[i][0] +
+                                      sModelView[j][1] * sGfxLookAt[i][1] +
+                                      sModelView[j][2] * sGfxLookAt[i][2];
+        }
+    }
 
     for (i = 0; i < 3; i++) {
         const Vtx* v = &sVtx[idx[i]];
@@ -639,13 +674,15 @@ static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
         sTexgenVertices[i].attribute[1] = (s8) v->v.cn[1];
         sTexgenVertices[i].attribute[2] = (s8) v->v.cn[2];
     }
-    n64psp_texgen_snorm8_batch(tc, &sLitNormalMatrix, sTexgenVertices,
+    n64psp_texgen_snorm8_batch(tc, &lookMatrix, sTexgenVertices,
                                (sGeometryMode & G_TEXTURE_GEN_LINEAR) ? N64PSP_TEXGEN_LINEAR
                                                                      : N64PSP_TEXGEN_SPHERICAL,
                                (size_t) 3);
     for (i = 0; i < 3; i++) {
-        outU[i] = ((float) tc[i].s / 65536.0f) * 2.0f * width * scaleS - (float) sTileUls[tile] / 4.0f;
-        outV[i] = ((float) tc[i].t / 65536.0f) * 2.0f * height * scaleT - (float) sTileUlt[tile] / 4.0f;
+        outU[i] = (float) ((s32) ((float) tc[i].s * sTextureScaleS / 65536.0f)) / 32.0f -
+                  (float) sTileUls[tile] / 4.0f;
+        outV[i] = (float) ((s32) ((float) tc[i].t * sTextureScaleT / 65536.0f)) / 32.0f -
+                  (float) sTileUlt[tile] / 4.0f;
     }
 }
 
@@ -658,7 +695,9 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     int modulate = 1;
     int blendColorOnly = psp_gfx_3d_blend_color_only();
     int lit = !blendColorOnly && (sGeometryMode & G_LIGHTING) && sNumLights > 0;
-    int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit;
+    int reflection = sFlx && sFlxTableValid && sFlxDirectionValid &&
+                     (sGeometryMode & G_TEXTURE_GEN) && lit;
+    int texgen = (sGeometryMode & G_TEXTURE_GEN) && lit && !reflection;
     int traceLit = lit && sLitTraceState == 0;
     int texFunc = 0;
     u32 tile;
@@ -725,8 +764,17 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             sLitNormals[k].w = 0;
         }
         psp_gfx_build_light_defs();
-        n64psp_directional_light_snorm8_batch(sLitOutput, &sLitNormalMatrix, sLitNormals, sLitLights,
+        n64psp_directional_light_snorm8_batch(sLitOutput, &sLightIdentity, sLitNormals, sLitLights,
                                              &sLitAmbient, (size_t) sNumLights, 3);
+        for (k = 0; k < 3; k++) {
+            float x = sLitNormals[k].x;
+            float y = sLitNormals[k].y;
+            float z = sLitNormals[k].z;
+            float magnitude = sqrtf(x * x + y * y + z * z) / 127.0f;
+            sLitOutput[k].x = sLitAmbient.x + (sLitOutput[k].x - sLitAmbient.x) * magnitude;
+            sLitOutput[k].y = sLitAmbient.y + (sLitOutput[k].y - sLitAmbient.y) * magnitude;
+            sLitOutput[k].z = sLitAmbient.z + (sLitOutput[k].z - sLitAmbient.z) * magnitude;
+        }
         if (traceLit) {
             PspLog("[gfx] first lit lighting ready\n");
         }
@@ -763,6 +811,25 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
             a = v->v.cn[3];
             if (a == 0) {
                 a = 255;
+            }
+            if (reflection) {
+                float direction[3];
+                float length;
+                float dot;
+                int axis;
+                int index;
+                for (axis = 0; axis < 3; axis++) {
+                    direction[axis] = sModelView[axis][0] * sFlxDirection[0] +
+                                      sModelView[axis][1] * sFlxDirection[1] +
+                                      sModelView[axis][2] * sFlxDirection[2];
+                }
+                length = sqrtf(direction[0] * direction[0] + direction[1] * direction[1] +
+                               direction[2] * direction[2]);
+                dot = length > 0.000001f ? ((s8) v->v.cn[0] * direction[0] +
+                      (s8) v->v.cn[1] * direction[1] + (s8) v->v.cn[2] * direction[2]) / length : 0;
+                index = (int) dot;
+                index = index < -128 ? -128 : index > 127 ? 127 : index;
+                a = sFlxTable[128 + index];
             }
         } else {
             u32 c = psp_gfx_vertex_color(v);
@@ -820,6 +887,9 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.wrapS = psp_gfx_tile_clamp(sTileCms[tile]);
     state.wrapT = psp_gfx_tile_clamp(sTileCmt[tile]);
     state.filter = ((sOtherModeH >> G_MDSFT_TEXTFILT) & 3) != G_TF_POINT;
+    state.reflection = reflection && ((sOtherModeL >> 30) & 3) == G_BL_CLR_FOG;
+    state.reflectionColor = sFogColor;
+    if (state.reflection) state.blend = 0;
 
     {
         /* Capture material changes so the depth pass cannot fill the log */
@@ -1380,6 +1450,21 @@ static void psp_gfx_walk(const Gfx* dl) {
         switch (op) {
             case G_ENDDL:
                 return;
+            case G_LOAD_UCODE:
+                sFlx = (w1 & 0x1fffffffu) == ((u32) gspF3DFLX2_Rej_fifoTextStart & 0x1fffffffu);
+                sFlxTableValid = 0;
+                sFlxDirectionValid = 0;
+                break;
+            case G_DMA_IO: {
+                u32 dmem = ((w0 >> 13) & 0x3ff) * 8;
+                u32 size = (w0 & 0xfff) + 1;
+                const void* data = (const void*) psp_gfx_ram_addr(w1);
+                if (sFlx && !(w0 & (1u << 23)) && dmem == 0x8b0 && size == 256 && data != NULL) {
+                    memcpy(sFlxTable, data, sizeof(sFlxTable));
+                    sFlxTableValid = 1;
+                }
+                break;
+            }
             case G_DL: {
                 const Gfx* sub = (const Gfx*) (u32) psp_gfx_ram_addr(w1);
                 if (sub != NULL && sub != cur) {
@@ -1474,7 +1559,19 @@ static void psp_gfx_walk(const Gfx* dl) {
                     u32 ofs = _SHIFTR(w0, 8, 8) * 8;
                     const Light* light = (const Light*) (u32) psp_gfx_ram_addr(w1);
 
-                    /* L0 starts at offset 48; lookat entries are below it */
+                    if (light != NULL && ofs == 24 && sFlx && sFlxTableValid) {
+                        s16 direction[3];
+                        memcpy(direction, (const u8*) light + 8, sizeof(direction));
+                        sFlxDirection[0] = direction[0];
+                        sFlxDirection[1] = direction[1];
+                        sFlxDirection[2] = direction[2];
+                        sFlxDirectionValid = 1;
+                    } else if (light != NULL && (ofs == 0 || ofs == 24)) {
+                        u32 axis = ofs / 24;
+                        sGfxLookAt[axis][0] = (float) (s8) light->l.dir[0];
+                        sGfxLookAt[axis][1] = (float) (s8) light->l.dir[1];
+                        sGfxLookAt[axis][2] = (float) (s8) light->l.dir[2];
+                    }
                     if (light != NULL && ofs >= 48) {
                         u32 n = ofs / 24 - 1;
 
@@ -1575,6 +1672,10 @@ static void psp_gfx_walk(const Gfx* dl) {
                 break;
             case G_SETBLENDCOLOR:
                 sBlendColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xFF00) | ((w1 << 8) & 0xFF0000) | (w1 << 24);
+                break;
+            case G_SETFOGCOLOR:
+                sFogColor = ((w1 >> 24) & 255) | ((w1 >> 8) & 0xff00) |
+                            ((w1 << 8) & 0xff0000) | (w1 << 24);
                 break;
             case G_LOADBLOCK:
             case G_LOADTILE: {

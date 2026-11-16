@@ -187,6 +187,7 @@ void PspPlatform_RunGfxTask(OSTask* task) {
         }
 #endif
         PspGfx_BeginFrame();
+        PspGfx_SetMicrocode(task->t.ucode);
         PspGfx_RunDisplayList((const Gfx*) task->t.data_ptr, task->t.data_size);
 #ifdef PSP_FULL
         if (trace) {

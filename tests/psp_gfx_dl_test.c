@@ -24,6 +24,7 @@ int PspPlatform_DiagKey(void) {
 u8 gPspN64Ram[0x40000];
 u8 D_1000000[0x40000];
 u8 D_2000000[0x40000];
+u8 gspF3DFLX2_Rej_fifoTextStart[8];
 static u16 sNative[32 * 32] = { 0xF801 };
 static Gfx sCommands[2048];
 static const u16* sQueuedPixels[2048];
@@ -83,11 +84,12 @@ void n64psp_directional_light_snorm8_batch(n64psp_vec4f* output, const n64psp_ma
     (void) count;
 }
 static int sTexgenCalls;
+static n64psp_mat4f sCapturedTexgenMatrix;
 void n64psp_texgen_snorm8_batch(n64psp_texcoord_s10_5* output, const n64psp_mat4f* modelview,
                                 const void* packed_vertices, n64psp_texgen_mode mode, size_t count) {
     size_t i;
 
-    (void) modelview;
+    sCapturedTexgenMatrix = *modelview;
     (void) packed_vertices;
     (void) mode;
     sTexgenCalls++;
@@ -657,6 +659,8 @@ static void test_3d_no_zbuffer(void) {
 
 static void test_3d_texgen(void) {
     static Vtx vtx[3];
+    static LookAt look;
+    static Light ambient;
     static const Vp vp = { { { 320, 240, 511, 0 }, { 640, 600, 511, 0 } } };
     Gfx* p;
     int i;
@@ -685,9 +689,16 @@ static void test_3d_texgen(void) {
     }
 
     sTexgenCalls = 0;
+    look.l[0].l.dir[1] = 120;
+    look.l[1].l.dir[0] = -120;
+    ambient.l.col[0] = 100;
+    ambient.l.col[1] = 80;
+    ambient.l.col[2] = 60;
     p = sCommands;
     gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
     gSPNumLights(p++, NUMLIGHTS_1);
+    gSPLight(p++, &ambient, 2);
+    gSPLookAt(p++, &look);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPSetTextureFilter(p++, G_TF_BILERP);
     gDPSetCombineMode(p++, G_CC_MODULATEIA, G_CC_MODULATEIA);
@@ -700,10 +711,12 @@ static void test_3d_texgen(void) {
 
     assert(sTri3Count == 3);
     assert(sTexgenCalls == 1);
-    /* One texture width spans the sphere at full gSPTexture scale */
-    assert(fabsf(sTri3[0].u - 2.0f) < 0.01f);
-    assert(fabsf(sTri3[0].v - 1.0f) < 0.01f);
-    assert(fabsf(sTri3[2].u - 2.0f) < 0.01f);
+    assert(sLitAmbient.x == 100 && sLitAmbient.y == 80 && sLitAmbient.z == 60);
+    assert(sCapturedTexgenMatrix.m[1][0] == 0 && sCapturedTexgenMatrix.m[1][1] == 120);
+    assert(sCapturedTexgenMatrix.m[0][0] == -120 && sCapturedTexgenMatrix.m[0][1] == 0);
+    assert(fabsf(sTri3[0].u - 127.96875f) < 0.01f);
+    assert(fabsf(sTri3[0].v - 63.96875f) < 0.01f);
+    assert(fabsf(sTri3[2].u - 127.96875f) < 0.01f);
     assert(sTri3State.filter == 1);
 
     p = sCommands;
@@ -712,6 +725,52 @@ static void test_3d_texgen(void) {
     gSPClearGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
     gSPTexture(p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
     run(p);
+}
+
+static void test_flx_reflection(void) {
+    static Vtx vertices[3];
+    static Light light;
+    static u8 table[256];
+    static s16 direction[3] = { 0, 0, 16383 };
+    Gfx* p = sCommands;
+    int i;
+
+    memset(&light, 0, sizeof(light));
+    memcpy((u8*) &light + 8, direction, sizeof(direction));
+    for (i = 0; i < 256; i++) table[i] = i;
+    table[255] = 77;
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.cn[2] = 127;
+        vertices[i].v.cn[3] = 255;
+        vertices[i].v.tc[0] = 320;
+        vertices[i].v.tc[1] = 640;
+    }
+    PspGfx_SetMicrocode(NULL);
+    assert(!sFlx);
+    sProjectionSet = sProjectionPerspective = 1;
+    psp_gfx_mat_identity(sModelView);
+    p->words.w0 = (u32) G_LOAD_UCODE << 24;
+    p++->words.w1 = (u32) gspF3DFLX2_Rej_fifoTextStart & 0x1fffffffu;
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_SHADE | G_LIGHTING | G_TEXTURE_GEN);
+    gSPNumLights(p++, 1);
+    gDPSetCycleType(p++, G_CYC_2CYCLE);
+    gDPSetCombineMode(p++, G_CC_MODULATERGB, G_CC_PASS2);
+    gDPSetRenderMode(p++, Z_CMP | Z_UPD | G_RM_FOG_SHADE_A, Z_CMP | Z_UPD | G_RM_NOOP2);
+    gDPLoadTextureBlock(p++, sNative, G_IM_FMT_RGBA, G_IM_SIZ_16b, 16, 16, 0, 0, 0, 0, 0, 0, 0);
+    gSPTexture(p++, 0xFFFF, 0xFFFF, 0, 0, G_ON);
+    gSPDmaRead(p++, 0x8B0, table, sizeof(table));
+    gSPLookAtY(p++, &light);
+    gDPSetFogColor(p++, 40, 80, 120, 255);
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3State.reflection && sTri3State.reflectionColor == 0xff785028u);
+    assert(!sTri3State.blend && (sTri3[0].color >> 24) == 77);
+    assert(fabsf(sTri3[0].u - 320.0f * 65535.0f / 65536.0f / 32.0f) < 0.001f);
+    assert(fabsf(sTri3[0].v - 640.0f * 65535.0f / 65536.0f / 32.0f) < 0.001f);
+    PspGfx_SetMicrocode(NULL);
+    assert(!sFlx && !sFlxTableValid && !sFlxDirectionValid);
+    sProjectionSet = sProjectionPerspective = 0;
 }
 
 static void test_3d_two_cycle_texture(void) {
@@ -1246,6 +1305,7 @@ int main(void) {
     test_perspective_y();
     test_3d_no_zbuffer();
     test_3d_texgen();
+    test_flx_reflection();
     test_3d_two_cycle_texture();
     test_3d_mirror_wrap();
     test_3d_uv_scale();

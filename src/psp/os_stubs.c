@@ -30,7 +30,7 @@ float __libm_qnan_f = 0.0f;
 
 /* RSP microcode ranges: present but empty on the native build */
 #define PSP_UCODE_RANGE_IMPL(a, b) \
-    __asm__(".section .rodata\n.balign 8\n.globl " #a "\n" #a ":\n.globl " #b "\n" #b ":\n.previous\n")
+    __asm__(".section .rodata\n.balign 8\n.globl " #a "\n" #a ":\n.globl " #b "\n" #b ":\n.byte 0\n.previous\n")
 #define PSP_UCODE_RANGE(a, b) PSP_UCODE_RANGE_IMPL(a, b)
 
 PSP_UCODE_RANGE(rspbootTextStart, rspbootTextEnd);

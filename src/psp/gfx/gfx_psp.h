@@ -50,11 +50,14 @@ typedef struct {
     int wrapT;
     /* 1 = bilinear, 0 = nearest */
     int filter;
+    int reflection;
+    u32 reflectionColor;
 } PspGfxDrawState;
 
 int PspGfx_Init(void);
 void PspGfx_BeginFrame(void);
 void PspGfx_RunDisplayList(const Gfx* dl, u32 size);
+void PspGfx_SetMicrocode(const void* text);
 void PspGfx_Present(void);
 u32 PspGfx_DrawCount(void);
 /* Marks a presented frame so decoded tiles from older frames can be recycled */
