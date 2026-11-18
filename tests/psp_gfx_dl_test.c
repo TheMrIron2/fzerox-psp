@@ -1385,6 +1385,99 @@ static void test_mtx_decode(void) {
     assert(mf[1][0] == 0.0f);
 }
 
+static void test_light_definition_cache(void) {
+    static Light light;
+    static Mtx matrix;
+    Gfx* p;
+
+    p = sCommands;
+    gSPNumLights(p++, 1);
+    run(p);
+    assert(sLightDefsDirty);
+    psp_gfx_build_light_defs();
+    assert(!sLightDefsDirty);
+    sLitAmbient.x = -123.0f;
+    psp_gfx_build_light_defs();
+    assert(sLitAmbient.x == -123.0f);
+
+    p = sCommands;
+    gMoveWd(p++, G_MW_LIGHTCOL, 24, 0x12345600);
+    run(p);
+    assert(sLightDefsDirty);
+    psp_gfx_build_light_defs();
+    assert(sLitAmbient.x == 0x12 && sLitAmbient.y == 0x34 && sLitAmbient.z == 0x56);
+
+    memset(&light, 0, sizeof(light));
+    light.l.dir[0] = 127;
+    p = sCommands;
+    gSPLight(p++, &light, 1);
+    run(p);
+    assert(sLightDefsDirty);
+    psp_gfx_build_light_defs();
+    assert(sLitLights[0].direction.x == 1.0f);
+
+    memset(&matrix, 0, sizeof(matrix));
+    matrix.m[0][0] = matrix.m[1][1] = matrix.m[2][2] = matrix.m[3][3] = 1;
+    p = sCommands;
+    gSPMatrix(p++, &matrix, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    run(p);
+    assert(sLightDefsDirty);
+    psp_gfx_build_light_defs();
+    assert(sLitNormalMatrix.m[0][0] == 1.0f);
+}
+
+static void test_matrix_multiply_order(void) {
+    float a[4][4], b[4][4], expected[4][4], actual[4][4];
+    int i, j, k;
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            a[i][j] = (float) (i * 5 - j * 2 + 1);
+            b[i][j] = (float) (j * 7 + i * 3 - 4);
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            expected[i][j] = 0;
+            for (k = 0; k < 4; k++) expected[i][j] += a[i][k] * b[k][j];
+        }
+    }
+    psp_gfx_mat_mul(actual, a, b);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+    memcpy(actual, a, sizeof(actual));
+    psp_gfx_mat_mul(actual, actual, b);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+    memcpy(actual, b, sizeof(actual));
+    psp_gfx_mat_mul(actual, a, actual);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+}
+
+static void test_texture_compaction_order(void) {
+    u32 i;
+    sTexEntryCount = 2;
+    sTexPoolUsed = 128;
+    memset(sTexEntries, 0, sizeof(sTexEntries));
+    sTexEntries[0].pixels = &sTexPool[64];
+    sTexEntries[0].potW = 8;
+    sTexEntries[0].potH = 8;
+    sTexEntries[0].stamp = 5;
+    sTexEntries[0].addr = 2;
+    sTexEntries[1].pixels = &sTexPool[0];
+    sTexEntries[1].potW = 8;
+    sTexEntries[1].potH = 8;
+    sTexEntries[1].stamp = 5;
+    sTexEntries[1].addr = 1;
+    for (i = 0; i < 64; i++) {
+        sTexPool[i] = 0x1111;
+        sTexPool[64 + i] = 0x2222;
+    }
+    psp_gfx_tex_compact(5);
+    for (i = 0; i < sTexEntryCount; i++) {
+        u16 expected = sTexEntries[i].addr == 1 ? 0x1111 : 0x2222;
+        u32 j;
+        for (j = 0; j < 64; j++) assert(sTexEntries[i].pixels[j] == expected);
+    }
+}
+
 int main(void) {
     Gfx* p = sCommands;
 
@@ -1418,6 +1511,9 @@ int main(void) {
     test_road_gadget_depth_states();
     test_mtx_decode();
     test_boot_framebuffer();
+    test_matrix_multiply_order();
+    test_light_definition_cache();
+    test_texture_compaction_order();
     puts("PSP HUD display list tests passed");
     return 0;
 }

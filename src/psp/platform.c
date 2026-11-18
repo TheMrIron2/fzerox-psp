@@ -1,10 +1,12 @@
 #include "src/psp/platform.h"
+#include "src/psp/overlay.h"
 #include "src/psp/gfx/gfx_psp.h"
 
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
+#include <string.h>
 
 #ifdef PSP_FULL
 extern s32 gGameMode;
@@ -23,8 +25,6 @@ static u32 sViRetraceCounter;
 static volatile u32 sViCount;
 /* Keep retraces from filling the scheduler queue during synchronous graphics */
 static volatile int sViPending;
-/* Sampled on the input thread; the renderer only reads this flag */
-static volatile int sDiagKey;
 static SceUID sViThreadId = -1;
 static volatile u32 sGfxTaskCount;
 static volatile u32 sAudioTaskCount;
@@ -104,7 +104,9 @@ void PspPlatform_PollInput(OSContPad* pads) {
         return;
     }
 
-    sceCtrlReadBufferPositive(&data, 1);
+    memset(&data, 0, sizeof(data));
+    data.Lx = data.Ly = 128;
+    sceCtrlPeekBufferPositive(&data, 1);
 
     for (i = 0; i < MAXCONTROLLERS; i++) {
         pads[i].button = 0;
@@ -112,6 +114,8 @@ void PspPlatform_PollInput(OSContPad* pads) {
         pads[i].stick_y = 0;
         pads[i].errno = (i == 0) ? 0 : CONT_NO_RESPONSE_ERROR;
     }
+
+    if (PspOverlay_Input(data.Buttons)) return;
 
     /* Provisional mapping: C buttons still need a proper remap path */
     button = 0;
@@ -152,15 +156,17 @@ void PspPlatform_PollInput(OSContPad* pads) {
     pads[0].button = button;
     pads[0].stick_x = psp_stick_axis((s32) data.Lx - 128);
     pads[0].stick_y = psp_stick_axis(128 - (s32) data.Ly);
-    sDiagKey = (data.Buttons & PSP_CTRL_SELECT) != 0;
-}
-
-int PspPlatform_DiagKey(void) {
-    return sDiagKey;
 }
 
 void PspPlatform_RunGfxTask(OSTask* task) {
     static int sGfxInit;
+#ifdef PSP_PROFILE
+    extern u32 gPspProfileSyncUs, gPspProfileVblankUs;
+    static u64 lastStart, sumInterval, sumDl, sumSync, sumVblank;
+    static u32 samples, sumDecodes;
+    u64 start, dlStart, dlEnd;
+    u32 decodeStart;
+#endif
 #ifdef PSP_FULL
     static s32 sLastMode = -1;
     static u32 sModeTasks;
@@ -176,6 +182,12 @@ void PspPlatform_RunGfxTask(OSTask* task) {
     sGfxTaskCount++;
 
     if (task != NULL) {
+#ifdef PSP_PROFILE
+        start = sceKernelGetSystemTimeWide();
+        decodeStart = PspGfx_TexDecodeCount();
+        if (lastStart != 0) sumInterval += start - lastStart;
+        lastStart = start;
+#endif
         if (!sGfxInit) {
             PspGfx_Init();
             sGfxInit = 1;
@@ -188,7 +200,13 @@ void PspPlatform_RunGfxTask(OSTask* task) {
 #endif
         PspGfx_BeginFrame();
         PspGfx_SetMicrocode(task->t.ucode);
+#ifdef PSP_PROFILE
+        dlStart = sceKernelGetSystemTimeWide();
+#endif
         PspGfx_RunDisplayList((const Gfx*) task->t.data_ptr, task->t.data_size);
+#ifdef PSP_PROFILE
+        dlEnd = sceKernelGetSystemTimeWide();
+#endif
 #ifdef PSP_FULL
         if (trace) {
             PspLog("[gfx] mode=%04x task=%u decoded tiles=%u\n", (unsigned) sLastMode,
@@ -196,6 +214,21 @@ void PspPlatform_RunGfxTask(OSTask* task) {
         }
 #endif
         PspGfx_Present();
+#ifdef PSP_PROFILE
+        sumDl += dlEnd - dlStart;
+        sumSync += gPspProfileSyncUs;
+        sumVblank += gPspProfileVblankUs;
+        sumDecodes += PspGfx_TexDecodeCount() - decodeStart;
+        if (++samples == 120) {
+            PspLog("[perf] mode=%04x frames=%u interval_us=%u dl_us=%u sync_us=%u vblank_us=%u decodes=%u\n",
+                   (unsigned) sLastMode, (unsigned) samples, (unsigned) (sumInterval / samples),
+                   (unsigned) (sumDl / samples), (unsigned) (sumSync / samples),
+                   (unsigned) (sumVblank / samples), (unsigned) (sumDecodes / samples));
+            samples = 0;
+            sumInterval = sumDl = sumSync = sumVblank = 0;
+            sumDecodes = 0;
+        }
+#endif
 #ifdef PSP_FULL
         if (trace) {
             PspLog("[gfx] mode=%04x task=%u presented\n", (unsigned) sLastMode, (unsigned) sGfxTaskCount);

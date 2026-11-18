@@ -32,6 +32,7 @@ static int sReflectionTextureEnabled;
 static int sReflectionTextureStates[2];
 static int sReflectionBlendEnabled;
 static int sReflectionBlendStates[2];
+static int sBlendCalls;
 
 void sceGuShadeModel(int mode) {
     sTestShadeModel = mode;
@@ -105,13 +106,13 @@ void sceGuEnable(int state) {
     if (state == GU_CLIP_PLANES) sClipPlanes = 1;
     if (state == GU_DEPTH_TEST) sTestDepthEnabled = 1;
     if (state == GU_TEXTURE_2D) sReflectionTextureEnabled = 1;
-    if (state == GU_BLEND) sReflectionBlendEnabled = 1;
+    if (state == GU_BLEND) { sReflectionBlendEnabled = 1; sBlendCalls++; }
 }
 void sceGuDisable(int state) {
     if (state == GU_CLIP_PLANES) sClipPlanes = 0;
     if (state == GU_DEPTH_TEST) sTestDepthEnabled = 0;
     if (state == GU_TEXTURE_2D) sReflectionTextureEnabled = 0;
-    if (state == GU_BLEND) sReflectionBlendEnabled = 0;
+    if (state == GU_BLEND) { sReflectionBlendEnabled = 0; sBlendCalls++; }
 }
 void sceGuDepthFunc(int function) {
     sTestDepthFunction = function;
@@ -410,8 +411,33 @@ static void test_reflection_pass(void) {
     assert(sTestDepthMask == GU_FALSE);
 }
 
+static void test_blend_reuse(void) {
+    PspGfxDrawState state;
+    PspGfxVertex3D vertices[3] = { { 0 } };
+    int calls;
+    memset(&state, 0, sizeof(state));
+    state.projection = (const float*) &sIdentityMatrix;
+    state.blend = 1;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sReflectionBlendEnabled);
+    calls = sBlendCalls;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sBlendCalls == calls);
+    PspGfx_DrawSolidRect(0, 0, 4, 4, 0xffffffff);
+    assert(!sReflectionBlendEnabled);
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sReflectionBlendEnabled);
+    state.blend = 0;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(!sReflectionBlendEnabled);
+}
+
 int main(void) {
     int x, y;
+
+    assert(psp_gfx_free_buffer(GU_DISP_OFFSET, GU_DRAW_OFFSET) == GU_THIRD_OFFSET);
+    assert(psp_gfx_free_buffer(GU_DRAW_OFFSET, GU_THIRD_OFFSET) == GU_DISP_OFFSET);
+    assert(psp_gfx_free_buffer(GU_THIRD_OFFSET, GU_DISP_OFFSET) == GU_DRAW_OFFSET);
 
     assert(!PspGfx_ReadFramebuffer(sReadback, 320, 240));
     s2dScaleX = s2dScaleY = 272.0f / 240.0f;
@@ -437,6 +463,7 @@ int main(void) {
     test_3d_clipping();
     test_ordered_road_depth();
     test_reflection_pass();
+    test_blend_reuse();
     puts("PSP GU framebuffer texture coordinate clipping and depth tests passed");
     return 0;
 }

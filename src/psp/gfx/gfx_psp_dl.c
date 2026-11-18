@@ -15,7 +15,7 @@
 #define PSP_TEX_MIN_HEIGHT 8
 
 extern u32 gSegments[16];
-extern int PspPlatform_DiagKey(void);
+
 
 extern u8 D_1000000[];
 extern u8 D_2000000[];
@@ -332,6 +332,17 @@ static void psp_gfx_tex_compact(u32 keepFrom) {
     u32 used = 0;
     u32 i;
 
+    for (i = 1; i < sTexEntryCount; i++) {
+        PspTexEntry entry = sTexEntries[i];
+        u32 j = i;
+
+        while (j > 0 && sTexEntries[j - 1].pixels > entry.pixels) {
+            sTexEntries[j] = sTexEntries[j - 1];
+            j--;
+        }
+        sTexEntries[j] = entry;
+    }
+
     for (i = 0; i < sTexEntryCount; i++) {
         PspTexEntry entry = sTexEntries[i];
         u32 count;
@@ -496,12 +507,9 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
 static PspTexEntry* s3dTexEntry;
 static u32 s3dTexMirror;
 static int s3dTexDirty = 1;
-/* Temporary texture diagnostics, captured for the frame SELECT is pressed */
-static int sTexDiag;
-static u32 sTexDiagKey;
-static int sDiagLogging;
-static int sDiagArmed = 1;
 static int sLitTraceState;
+static int sLightDefsDirty = 1;
+#define PSP_LIGHT_DIRTY() (sLightDefsDirty = 1)
 
 static u8 psp_gfx_remap_light(float value) {
     if (value <= 0.0f) {
@@ -517,6 +525,8 @@ static void psp_gfx_build_light_defs(void) {
     int i;
     int j;
 
+    if (!sLightDefsDirty) return;
+    sLightDefsDirty = 0;
     for (i = 0; i < sNumLights && i < 8; i++) {
         float x = sModelView[0][0] * sLightSlots[i].x + sModelView[0][1] * sLightSlots[i].y +
                   sModelView[0][2] * sLightSlots[i].z;
@@ -918,30 +928,6 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     state.reflectionColor = floorMix && textured ? sPrimColor8888 : sFogColor;
     if (state.reflection) state.blend = 0;
 
-    {
-        /* Capture material changes so the depth pass cannot fill the log */
-        if (sDiagLogging && textured && tex != NULL && sTexDiag < 64) {
-            u32 key = sCombineW0;
-
-            key = key * 16777619u ^ sCombineW1;
-            key = key * 16777619u ^ sGeometryMode;
-            key = key * 16777619u ^ sOtherModeL;
-            key = key * 16777619u ^ sPrimColor8888;
-            key = key * 16777619u ^ sEnvColor;
-            key = key * 16777619u ^ tex->addr;
-            key = key * 16777619u ^ tile;
-            if (sTexDiag == 0 || key != sTexDiagKey) {
-                sTexDiagKey = key;
-                sTexDiag++;
-                PspLog("[gfx] tx tf=%d lit=%d tile=%u fmt=%u w=%u h=%u cmb=%08x/%08x col=%08x px=%04x "
-                       "src=%08x tm=%03x bake=%u native=%d gm=%08x\n", texFunc, lit,
-                       (unsigned) tile, (unsigned) sTileFmt[tile], (unsigned) sTileWidth[tile],
-                       (unsigned) sTileHeight[tile], (unsigned) sCombineW0, (unsigned) sCombineW1,
-                       (unsigned) tri[0].color, (unsigned) tex->pixels[0], (unsigned) tex->addr,
-                       (unsigned) sTileTmem[tile], (unsigned) tex->variant, tex->native, (unsigned) sGeometryMode);
-            }
-        }
-    }
     PspGfx_DrawTriangles3D(tri, 3, &state);
     if (traceLit) {
         PspLog("[gfx] first lit triangle queued\n");
@@ -1555,6 +1541,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                     if (++sModelViewSerial == 0) {
                         sModelViewSerial = 1;
                     }
+                    PSP_LIGHT_DIRTY();
                 }
                 psp_gfx_mat_mul(sMP, sModelView, sProjection);
                 break;
@@ -1570,6 +1557,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 if (++sModelViewSerial == 0) {
                     sModelViewSerial = 1;
                 }
+                PSP_LIGHT_DIRTY();
                 break;
             }
             case G_MOVEMEM: {
@@ -1626,6 +1614,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                             slot->r = light->l.col[0];
                             slot->g = light->l.col[1];
                             slot->b = light->l.col[2];
+                            PSP_LIGHT_DIRTY();
                         }
                     }
                 }
@@ -1757,6 +1746,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 offset = w0 & 0xFFFF;
 
                 if (index == G_MW_NUMLIGHT) {
+                    PSP_LIGHT_DIRTY();
                     sNumLights = (s32) (w1 / 24);
                     if (sNumLights > 7) {
                         sNumLights = 7;
@@ -1777,6 +1767,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                         sLightSlots[slot].r = (w1 >> 24) & 0xFF;
                         sLightSlots[slot].g = (w1 >> 16) & 0xFF;
                         sLightSlots[slot].b = (w1 >> 8) & 0xFF;
+                        PSP_LIGHT_DIRTY();
                     }
                 } else if (index == G_MW_SEGMENT) {
                     u32 segment = offset / 4;
@@ -1873,17 +1864,6 @@ static void psp_gfx_walk(const Gfx* dl) {
 
 void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
     int first = (sDrawCount == 0);
-    int diagKey = PspPlatform_DiagKey();
-
-    if (!diagKey) {
-        sDiagArmed = 1;
-        sDiagLogging = 0;
-    } else if (sDiagArmed) {
-        sDiagArmed = 0;
-        sTexDiag = 0;
-        sDiagLogging = 1;
-        PspLog("[gfx] diag press\n");
-    }
 
     (void) size;
 
@@ -1895,6 +1875,7 @@ void PspGfx_RunDisplayList(const Gfx* dl, u32 size) {
             sTileSiz[i] = 0xFF;
         }
         psp_gfx_mat_identity(sModelView);
+        PSP_LIGHT_DIRTY();
         psp_gfx_mat_identity(sProjection);
         psp_gfx_mat_identity(sMP);
         sProjectionPerspective = 0;

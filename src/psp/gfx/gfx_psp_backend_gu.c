@@ -8,6 +8,7 @@
 
 #include "src/psp/gfx/gfx_psp.h"
 #include "src/psp/psp.h"
+#include "src/psp/overlay.h"
 
 #define GU_LIST_WORDS 0x40000
 #define GU_FB_WIDTH 512
@@ -15,7 +16,8 @@
 #define GU_FB_STRIDE (GU_FB_WIDTH * 2)
 #define GU_DRAW_OFFSET 0
 #define GU_DISP_OFFSET (GU_FB_STRIDE * GU_FB_HEIGHT)
-#define GU_DEPTH_OFFSET (GU_DISP_OFFSET * 2)
+#define GU_THIRD_OFFSET (GU_DISP_OFFSET * 2)
+#define GU_DEPTH_OFFSET (GU_DISP_OFFSET * 3)
 
 #define PSP_SCREEN_W 480.0f
 #define PSP_SCREEN_H 272.0f
@@ -24,9 +26,14 @@
 
 static u32 sGuList[GU_LIST_WORDS] __attribute__((aligned(64)));
 static int sGuReady;
-static int sDisplayed;
 static u32 sDrawOffset = GU_DRAW_OFFSET;
+static u32 sPendingOffset = GU_DISP_OFFSET;
 static const volatile u16* sLastFrame;
+static u64 sFrameStartUs;
+#ifdef PSP_PROFILE
+u32 gPspProfileSyncUs;
+u32 gPspProfileVblankUs;
+#endif
 
 /* Cached 3D draw state */
 static int sViewportWide = -1;
@@ -43,6 +50,7 @@ static int sDepthWriteEnabled;
 static int sCullEnabled;
 static int sCullFront;
 static int sShadeModel = -1;
+static int sBlendEnabled;
 
 /* Cached 3D texture binding */
 static int sTexBoundValid;
@@ -80,6 +88,14 @@ static float s2dScaleX;
 static float s2dScaleY;
 static float s2dOffsetX;
 static float s2dOffsetY;
+
+static u32 psp_gfx_free_buffer(u32 displayed, u32 pending) {
+    u32 offset;
+    for (offset = 0; offset < GU_DEPTH_OFFSET; offset += GU_DISP_OFFSET) {
+        if (offset != displayed && offset != pending) return offset;
+    }
+    return GU_DEPTH_OFFSET;
+}
 
 static s16 psp_gfx_map_x(float x) {
     return (s16) ((x * s2dScaleX) + s2dOffsetX + 0.5f);
@@ -119,6 +135,18 @@ static void psp_gfx_gu_2d_state(void) {
     }
     /* 2D texture draws bypass the 3D bind cache */
     sTexBoundValid = 0;
+    sBlendEnabled = -1;
+}
+
+static void psp_gfx_gu_blend(int enabled) {
+    if (sBlendEnabled == enabled) return;
+    if (enabled) {
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    } else {
+        sceGuDisable(GU_BLEND);
+    }
+    sBlendEnabled = enabled;
 }
 
 static u16 psp_gfx_rgba8888_to_4444(u32 rgba) {
@@ -163,6 +191,7 @@ int PspGfx_Init(void) {
     sceGuDisable(GU_CLIP_PLANES);
     sceGuFinish();
     sceGuSync(0, 0);
+    sceGuDisplay(GU_TRUE);
 
     sViewportWide = 1;
     sMatrixValid = 0;
@@ -178,7 +207,9 @@ int PspGfx_Init(void) {
 }
 
 void PspGfx_BeginFrame(void) {
+    sFrameStartUs = sceKernelGetSystemTimeWide();
     sceGuStart(GU_DIRECT, sGuList);
+    sceGuDrawBufferList(GU_PSM_5650, (void*) sDrawOffset, GU_FB_WIDTH);
     psp_gfx_gu_viewport(1);
     sceGuEnable(GU_SCISSOR_TEST);
     sceGuScissor(0, 0, 480, 272);
@@ -201,25 +232,62 @@ void PspGfx_BeginFrame(void) {
     sCullEnabled = 0;
     sCullFront = 0;
     sShadeModel = -1;
+    sBlendEnabled = 0;
 }
 
 void PspGfx_Present(void) {
+    u64 workEnd, syncEnd, waitStart, waitEnd;
+#ifdef PSP_PROFILE
+    u64 syncStart;
+#endif
     if (!sGuReady) {
         return;
     }
 
+    PspOverlay_Draw();
     sceGuFinish();
+    workEnd = sceKernelGetSystemTimeWide();
+#ifdef PSP_PROFILE
+    syncStart = sceKernelGetSystemTimeWide();
+#endif
     sceGuSync(0, 0);
+    syncEnd = sceKernelGetSystemTimeWide();
+#ifdef PSP_PROFILE
+    gPspProfileSyncUs = (u32) (sceKernelGetSystemTimeWide() - syncStart);
+#endif
     /* The GU is done with the decoded tiles queued this frame */
     PspGfx_EndFrame();
-    sceDisplayWaitVblankStart();
-    sLastFrame = (const volatile u16*) ((u32) sceGeEdramGetAddr() | 0x40000000u | sDrawOffset);
-    sDrawOffset = (u32) sceGuSwapBuffers();
+#ifdef PSP_PROFILE
+    syncStart = sceKernelGetSystemTimeWide();
+#endif
+    waitStart = sceKernelGetSystemTimeWide();
+    {
+        void* current;
+        int stride, format;
+        u32 currentOffset;
+        u32 pendingAddress = (u32) sceGeEdramGetAddr() + sPendingOffset;
 
-    if (!sDisplayed) {
-        sceGuDisplay(GU_TRUE);
-        sDisplayed = 1;
+        for (;;) {
+            if (sceDisplayGetFrameBuf(&current, &stride, &format, PSP_DISPLAY_SETBUF_IMMEDIATE) == 0 &&
+                (((u32) current & 0x1fffffffu) == (pendingAddress & 0x1fffffffu))) break;
+            sceDisplayWaitVblankStart();
+        }
+        currentOffset = sPendingOffset;
+        while (sceDisplaySetFrameBuf((void*) ((u32) sceGeEdramGetAddr() + sDrawOffset), GU_FB_WIDTH,
+                                     PSP_DISPLAY_PIXEL_FORMAT_565, PSP_DISPLAY_SETBUF_NEXTFRAME) < 0) {
+            sceDisplayWaitVblankStart();
+        }
+        sPendingOffset = sDrawOffset;
+        sLastFrame = (const volatile u16*) ((u32) sceGeEdramGetAddr() | 0x40000000u | sDrawOffset);
+        sDrawOffset = psp_gfx_free_buffer(currentOffset, sPendingOffset);
     }
+    waitEnd = sceKernelGetSystemTimeWide();
+#ifdef PSP_PROFILE
+    gPspProfileVblankUs = (u32) (sceKernelGetSystemTimeWide() - syncStart);
+#endif
+    PspOverlay_RecordFrame((u32) (workEnd - sFrameStartUs), (u32) (syncEnd - workEnd),
+                           (u32) (waitEnd - waitStart), sceKernelGetSystemTimeWide());
+
 }
 
 void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba) {
@@ -521,14 +589,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sCullEnabled = 0;
     }
 
-    sceGuDisable(GU_ALPHA_TEST);
-
-    if (state->blend) {
-        sceGuEnable(GU_BLEND);
-        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
-    } else {
-        sceGuDisable(GU_BLEND);
-    }
+    psp_gfx_gu_blend(state->blend != 0);
 
     if (state->texturePixels != NULL && state->texWidth > 0 && state->texHeight > 0) {
         u32 wrap = (u32) ((state->wrapS != 0) | ((state->wrapT != 0) << 1));
@@ -576,8 +637,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
             }
             sceGuDisable(GU_TEXTURE_2D);
             sTexBoundValid = 0;
-            sceGuEnable(GU_BLEND);
-            sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+            psp_gfx_gu_blend(1);
             sceGuDepthMask(GU_TRUE);
             sDepthWriteEnabled = 0;
             psp_gfx_gu_clip_triangle(overlay, state->smoothShade);
@@ -585,7 +645,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
                 sceGuDepthMask(GU_FALSE);
                 sDepthWriteEnabled = 1;
             }
-            sceGuDisable(GU_BLEND);
+            psp_gfx_gu_blend(0);
             if (state->texturePixels != NULL) {
                 sceGuEnable(GU_TEXTURE_2D);
             }
