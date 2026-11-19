@@ -46,6 +46,9 @@ static u32 sTri3Count;
 static PspGfxDrawState sTri3States[2048];
 static u32 sTri3Colors[2048];
 static u32 sTri3Calls;
+static u32 sTextureWrites;
+static u32 sTextureWriteBytes;
+static const u16* sLastWrittenTexture;
 
 int PspGfx_Init(void) {
     return 1;
@@ -59,6 +62,11 @@ void PspLog(const char* fmt, ...) {
 }
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     (void) v;
+}
+void PspGfx_TextureWritten(const u16* pixels, u32 bytes) {
+    sTextureWrites++;
+    sTextureWriteBytes = bytes;
+    sLastWrittenTexture = pixels;
 }
 void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
     assert(sTri3Calls < 2048);
@@ -290,6 +298,8 @@ static void test_loaded_source_and_flip(void) {
 
 static void test_wipe_then_logo(void) {
     Gfx* p = sCommands;
+    u32 writes = sTextureWrites;
+    u32 decodes = PspGfx_TexDecodeCount();
     int row;
     int x;
 
@@ -327,11 +337,14 @@ static void test_wipe_then_logo(void) {
     assert(sWidth == 32 && sHeight == 32 && sPixels[0] == 0xFF00);
     assert(sQueuedPixels[0][0] == 0xF00F && sQueuedPixels[74][0] == 0xF0F0);
     assert(sQueuedPixels[75] == sQueuedPixels[76]);
+    assert(sTextureWrites > writes);
+    assert(sTextureWrites - writes == PspGfx_TexDecodeCount() - decodes);
 
     /* Replaying the same frame must come entirely from the decoded tile cache */
     {
         u32 before = PspGfx_TexDecodeCount();
 
+        writes = sTextureWrites;
         p = sCommands;
         gDPSetCycleType(p++, G_CYC_1CYCLE);
         gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
@@ -353,6 +366,7 @@ static void test_wipe_then_logo(void) {
         assert(sTextures == 77);
         assert(sPixels[0] == 0xFF00);
         assert(PspGfx_TexDecodeCount() == before);
+        assert(sTextureWrites == writes);
     }
 }
 
@@ -479,11 +493,15 @@ static void test_texture_byte_order(void) {
 }
 
 static void test_boot_framebuffer(void) {
+    u32 writes = sTextureWrites;
+
     sCpuFrame[70 * 320 + 96] = 0xF801;
     sTextures = 0;
     PspGfx_PresentFramebuffer(sCpuFrame);
     assert(sTextures == 1 && sRect[2] == 320 && sRect[3] == 240);
     assert(sWidth == 512 && sHeight == 256 && sPixels[70 * 512 + 96] == 0xF00F);
+    assert(sTextureWrites == writes + 1 && sLastWrittenTexture == sQueuedPixels[0]);
+    assert(sTextureWriteBytes == 512 * 256 * sizeof(u16));
 }
 
 static void test_offscreen_fill(void) {
@@ -1518,6 +1536,7 @@ static void test_matrix_multiply_order(void) {
 
 static void test_texture_compaction_order(void) {
     u32 i;
+    u32 writes = sTextureWrites;
     sTexEntryCount = 2;
     sTexPoolUsed = 128;
     memset(sTexEntries, 0, sizeof(sTexEntries));
@@ -1536,11 +1555,17 @@ static void test_texture_compaction_order(void) {
         sTexPool[64 + i] = 0x2222;
     }
     psp_gfx_tex_compact(5);
+    assert(sTextureWrites == writes);
     for (i = 0; i < sTexEntryCount; i++) {
         u16 expected = sTexEntries[i].addr == 1 ? 0x1111 : 0x2222;
         u32 j;
         for (j = 0; j < 64; j++) assert(sTexEntries[i].pixels[j] == expected);
     }
+    sTexEntries[0].stamp = 4;
+    psp_gfx_tex_compact(5);
+    assert(sTexEntryCount == 1 && sTexEntries[0].addr == 2);
+    assert(sTextureWrites == writes + 1 && sLastWrittenTexture == &sTexPool[0]);
+    assert(sTextureWriteBytes == 64 * sizeof(u16) && sLastWrittenTexture[0] == 0x2222);
 }
 
 int main(void) {

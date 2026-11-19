@@ -66,6 +66,8 @@ void PspGfx_EndFrame(void);
 u32 PspGfx_TexDecodeCount(void);
 /* Texture pixels were transformed in place; drop any decoded copies */
 void PspGfx_InvalidateTexture(const void* data, u32 size);
+/* Make completed texture writes visible before drawing */
+void PspGfx_TextureWritten(const u16* pixels, u32 bytes);
 
 /* 3D triangle already transformed to screen space by the interpreter */
 void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]);

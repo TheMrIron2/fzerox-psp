@@ -362,6 +362,7 @@ static void psp_gfx_tex_compact(u32 keepFrom) {
             for (j = 0; j < count; j++) {
                 dst[j] = src[j];
             }
+            PspGfx_TextureWritten(dst, count * sizeof(*dst));
             entry.pixels = dst;
         }
         sTexEntries[kept++] = entry;
@@ -1446,6 +1447,7 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
             }
         }
     }
+    PspGfx_TextureWritten(e->pixels, count * sizeof(*e->pixels));
     return e;
 }
 
@@ -2005,6 +2007,7 @@ void PspGfx_PresentFramebuffer(const u16* pixels) {
             sPresentBuffer[y * 512 + x] = x < 320 && y < 240 ? psp_gfx_rgba5551_to_4444(pixels[y * 320 + x]) : 0;
         }
     }
+    PspGfx_TextureWritten(sPresentBuffer, sizeof(sPresentBuffer));
     PspGfx_BeginFrame();
     PspGfx_DrawTexQuad(0, 0, 320, 240, sPresentBuffer, 512, 256, 0, 0, 320, 240, 0xFFFF, 0, 0, 0);
     PspGfx_Present();

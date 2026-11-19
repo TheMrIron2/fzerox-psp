@@ -16,6 +16,7 @@ typedef struct PspProfileFrame {
     unsigned int texture_binds, texture_bytes;
     unsigned int batch_draws, batch_vertices, batch_submit_us, batch_copy_us;
     unsigned int lit_vertices, lit_vertices_computed;
+    unsigned int texture_writebacks;
 } PspProfileFrame;
 extern PspProfileFrame *gPspProfileFrame;
 extern int gPspProfileSample;

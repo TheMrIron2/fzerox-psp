@@ -34,6 +34,7 @@ static int sReflectionBlendEnabled;
 static int sReflectionBlendStates[2];
 static int sBlendCalls;
 static int sBlendAtDraw;
+static int sTextureWritebacks;
 static int sScissorWrites;
 static int sDrawsBeforeScissor;
 
@@ -94,6 +95,7 @@ void sceGuSetMatrix(int type, const ScePspFMatrix4* matrix) {
 
 void sceKernelDcacheWritebackRange(const void* data, unsigned int size) {
     (void) data; (void) size;
+    sTextureWritebacks++;
 }
 
 void sceGuTexImage(int level, int width, int height, int stride, const void* pixels) {
@@ -153,6 +155,7 @@ static void test_3d_texture_units(void) {
     PspGfxVertex3D* submitted = (PspGfxVertex3D*) sVertexMemory;
     int calls;
     int shadeCalls;
+    int writebacks = sTextureWritebacks;
 
     memset(&state, 0, sizeof(state));
     memset(vertices, 0, sizeof(vertices));
@@ -164,6 +167,8 @@ static void test_3d_texture_units(void) {
     vertices[0].u = 16.0f;
     vertices[0].v = 32.0f;
     sGuReady = 1;
+    PspGfx_TextureWritten(sTestFrame, 16 * 32 * sizeof(u16));
+    assert(sTextureWritebacks == writebacks + 1);
     draw_triangles_and_flush(vertices, 3, &state);
     assert(sClipPlanes);
     assert(sTestShadeModel == GU_SMOOTH);
@@ -199,6 +204,7 @@ static void test_3d_texture_units(void) {
     assert(sScaleCalls == calls + 1);
     assert(submitted[0].u * sScaleU == 0.25f);
     assert(submitted[0].v * sScaleV == 2.0f);
+    assert(sTextureWritebacks == writebacks + 1);
 }
 
 static void set_clip_attributes(PspGfxVertex3D vertices[3]) {

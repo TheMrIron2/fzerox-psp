@@ -291,6 +291,12 @@ void PspGfx_Present(void) {
 
 }
 
+void PspGfx_TextureWritten(const u16* pixels, u32 bytes) {
+    PROFILE_COUNT(texture_writebacks, 1);
+    PROFILE_COUNT(texture_bytes, bytes);
+    sceKernelDcacheWritebackRange(pixels, bytes);
+}
+
 void PspGfx_DrawSolidRect(s32 x0, s32 y0, s32 x1, s32 y1, u32 rgba) {
     PspGuSolidVertex* v;
     u16 color;
@@ -343,8 +349,6 @@ void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 t
     sceGuEnable(GU_TEXTURE_2D);
     sceGuTexMode(GU_PSM_4444, 0, 0, 0);
     PROFILE_COUNT(texture_binds, 1);
-    PROFILE_COUNT(texture_bytes, texW * texH * sizeof(u16));
-    sceKernelDcacheWritebackRange((void*) pixels, texW * texH * sizeof(u16));
     sceGuTexImage(0, texW, texH, texW, pixels);
     sceGuTexFlush();
     sceGuTexFunc(modulate ? GU_TFX_MODULATE : GU_TFX_REPLACE, GU_TCC_RGBA);
@@ -697,9 +701,6 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
             sceGuEnable(GU_TEXTURE_2D);
             sceGuTexMode(GU_PSM_4444, 0, 0, 0);
             PROFILE_COUNT(texture_binds, 1);
-            PROFILE_COUNT(texture_bytes, state->texWidth * state->texHeight * sizeof(u16));
-            sceKernelDcacheWritebackRange((void*) state->texturePixels,
-                                          (unsigned) (state->texWidth * state->texHeight * (s32) sizeof(u16)));
             sceGuTexImage(0, state->texWidth, state->texHeight, state->texWidth, state->texturePixels);
             /* The interpreter supplies texels and the GE expects normalized coordinates */
             sceGuTexScale(1.0f / state->texWidth, 1.0f / state->texHeight);
