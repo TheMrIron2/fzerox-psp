@@ -7,9 +7,6 @@
 #ifdef PSP
 #include "src/psp/psp.h"
 #endif
-#if defined(PSP_GAME_PROFILE) && defined(PSP_PROFILE)
-extern long long sceKernelGetSystemTimeWide(void);
-#endif
 
 UNUSED s32 D_800DCE40;
 s32 gGameMode;
@@ -722,23 +719,7 @@ void func_800690FC(void) {
         Controller_UpdateInputs();
         gControllerReadDataStarted = false;
     }
-#if defined(PSP_GAME_PROFILE) && defined(PSP_PROFILE)
-    {
-        static u64 total;
-        static u32 count;
-        u64 start = sceKernelGetSystemTimeWide();
-        gQueuedGameMode = sGamemodeUpdateFuncs[GET_MODE(gGameMode)]();
-        total += sceKernelGetSystemTimeWide() - start;
-        if (++count == 120) {
-            PspLog("[gameperf] mode=%04x updates=%u update_us=%u\n", (unsigned) gGameMode,
-                   (unsigned) count, (unsigned) (total / count));
-            total = 0;
-            count = 0;
-        }
-    }
-#else
     gQueuedGameMode = sGamemodeUpdateFuncs[GET_MODE(gGameMode)]();
-#endif
     func_80068F04();
     switch (gGameModeChangeState) {
         case GAMEMODE_CHANGE_WAIT_TRANSITION_RELOAD:
@@ -758,23 +739,7 @@ extern s16 D_i2_80106DA0;
 Gfx* func_80069698(Gfx* gfx) {
 
     if ((gGameModeChangeState != GAMEMODE_CHANGE_INIT) && D_i2_80106DA0) {
-#if defined(PSP_GAME_PROFILE) && defined(PSP_PROFILE)
-        {
-            static u64 total;
-            static u32 count;
-            u64 start = sceKernelGetSystemTimeWide();
-            gfx = sGamemodeDrawFuncs[GET_MODE(gGameMode)](gfx);
-            total += sceKernelGetSystemTimeWide() - start;
-            if (++count == 120) {
-                PspLog("[gameperf] mode=%04x draws=%u build_us=%u\n", (unsigned) gGameMode,
-                       (unsigned) count, (unsigned) (total / count));
-                total = 0;
-                count = 0;
-            }
-        }
-#else
         gfx = sGamemodeDrawFuncs[GET_MODE(gGameMode)](gfx);
-#endif
     }
     return Transition_Draw(gfx);
 }

@@ -1,5 +1,6 @@
 #include "src/psp/platform.h"
 #include "src/psp/overlay.h"
+#include "src/psp/profiler.h"
 #include "src/psp/gfx/gfx_psp.h"
 
 #include <pspctrl.h>
@@ -162,10 +163,7 @@ void PspPlatform_RunGfxTask(OSTask* task) {
     static int sGfxInit;
 #ifdef PSP_PROFILE
     extern u32 gPspProfileSyncUs, gPspProfileVblankUs;
-    static u64 lastStart, sumInterval, sumDl, sumSync, sumVblank;
-    static u32 samples, sumDecodes;
-    u64 start, dlStart, dlEnd;
-    u32 decodeStart;
+    u64 dlStart, dlEnd;
 #endif
 #ifdef PSP_FULL
     static s32 sLastMode = -1;
@@ -182,12 +180,7 @@ void PspPlatform_RunGfxTask(OSTask* task) {
     sGfxTaskCount++;
 
     if (task != NULL) {
-#ifdef PSP_PROFILE
-        start = sceKernelGetSystemTimeWide();
-        decodeStart = PspGfx_TexDecodeCount();
-        if (lastStart != 0) sumInterval += start - lastStart;
-        lastStart = start;
-#endif
+        PspProfile_FrameBegin(task, sGfxTaskCount);
         if (!sGfxInit) {
             PspGfx_Init();
             sGfxInit = 1;
@@ -201,11 +194,11 @@ void PspPlatform_RunGfxTask(OSTask* task) {
         PspGfx_BeginFrame();
         PspGfx_SetMicrocode(task->t.ucode);
 #ifdef PSP_PROFILE
-        dlStart = sceKernelGetSystemTimeWide();
+        dlStart = gPspProfileFrame ? PROFILE_NOW() : 0;
 #endif
         PspGfx_RunDisplayList((const Gfx*) task->t.data_ptr, task->t.data_size);
 #ifdef PSP_PROFILE
-        dlEnd = sceKernelGetSystemTimeWide();
+        dlEnd = gPspProfileFrame ? PROFILE_NOW() : 0;
 #endif
 #ifdef PSP_FULL
         if (trace) {
@@ -215,19 +208,7 @@ void PspPlatform_RunGfxTask(OSTask* task) {
 #endif
         PspGfx_Present();
 #ifdef PSP_PROFILE
-        sumDl += dlEnd - dlStart;
-        sumSync += gPspProfileSyncUs;
-        sumVblank += gPspProfileVblankUs;
-        sumDecodes += PspGfx_TexDecodeCount() - decodeStart;
-        if (++samples == 120) {
-            PspLog("[perf] mode=%04x frames=%u interval_us=%u dl_us=%u sync_us=%u vblank_us=%u decodes=%u\n",
-                   (unsigned) sLastMode, (unsigned) samples, (unsigned) (sumInterval / samples),
-                   (unsigned) (sumDl / samples), (unsigned) (sumSync / samples),
-                   (unsigned) (sumVblank / samples), (unsigned) (sumDecodes / samples));
-            samples = 0;
-            sumInterval = sumDl = sumSync = sumVblank = 0;
-            sumDecodes = 0;
-        }
+        PspProfile_FrameEnd((u32)(dlEnd - dlStart), gPspProfileSyncUs, gPspProfileVblankUs);
 #endif
 #ifdef PSP_FULL
         if (trace) {

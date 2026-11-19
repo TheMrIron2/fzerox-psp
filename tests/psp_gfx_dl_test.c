@@ -72,16 +72,25 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
     }
     sTri3State = *state;
 }
+static size_t sTestLitVertices;
+static int sTestLightingEnabled;
+
 void n64psp_directional_light_snorm8_batch(n64psp_vec4f* output, const n64psp_mat4f* matrix,
                                            const n64psp_snorm8x4* normals, const n64psp_directional_lightf* lights,
                                            const n64psp_vec4f* ambient, size_t lightCount, size_t count) {
-    (void) output;
+    size_t i;
+
     (void) matrix;
     (void) normals;
     (void) lights;
-    (void) ambient;
     (void) lightCount;
-    (void) count;
+    if (sTestLightingEnabled) {
+        sTestLitVertices += count;
+        for (i = 0; i < count; i++) {
+            output[i] = *ambient;
+            output[i].x += 40.0f;
+        }
+    }
 }
 static int sTexgenCalls;
 static n64psp_mat4f sCapturedTexgenMatrix;
@@ -1426,6 +1435,62 @@ static void test_light_definition_cache(void) {
     assert(sLitNormalMatrix.m[0][0] == 1.0f);
 }
 
+static void test_lit_vertex_cache(void) {
+    static Vtx vertices[3];
+    static Vtx replacement;
+    static Mtx matrix;
+    Gfx* p = sCommands;
+    int i;
+
+    sTestLitVertices = 0;
+    sTestLightingEnabled = 1;
+    sProjectionSet = 1;
+    for (i = 0; i < 3; i++) {
+        vertices[i].v.cn[0] = 127;
+        vertices[i].v.cn[3] = 200;
+    }
+    replacement.v.cn[3] = 160;
+    for (i = 0; i < 4; i++) {
+        matrix.u.i[i][i] = 1;
+    }
+
+    gSPSetGeometryMode(p++, G_ZBUFFER | G_LIGHTING);
+    gSPClearGeometryMode(p++, G_TEXTURE_GEN | G_FOG);
+    gSPNumLights(p++, NUMLIGHTS_1);
+    gMoveWd(p++, G_MW_LIGHTCOL, 24, 0x10203000);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    gDPSetRenderMode(p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+    gDPSetCombineMode(p++, G_CC_SHADE, G_CC_SHADE);
+    gSPVertex(p++, vertices, 3, 0);
+    gSP1Triangle(p++, 0, 0, 1, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTri3Calls == 3 && sTestLitVertices == 3);
+    assert(sTri3[0].color == 0xc8302038u && sTri3[2].color == 0xc8302038u);
+
+    p = sCommands;
+    gSPVertex(p++, &replacement, 1, 0);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTestLitVertices == 4);
+    assert(sTri3[0].color == 0xa0302010u && sTri3[1].color == 0xc8302038u);
+
+    p = sCommands;
+    gMoveWd(p++, G_MW_LIGHTCOL, 24, 0x20304000);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTestLitVertices == 7);
+    assert(sTri3[0].color == 0xa0403020u && sTri3[1].color == 0xc8403048u);
+
+    p = sCommands;
+    gSPMatrix(p++, &matrix, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSP1Triangle(p++, 0, 1, 2, 0);
+    run(p);
+    assert(sTestLitVertices == 10);
+    sTestLightingEnabled = 0;
+}
+
 static void test_matrix_multiply_order(void) {
     float a[4][4], b[4][4], expected[4][4], actual[4][4];
     int i, j, k;
@@ -1513,6 +1578,7 @@ int main(void) {
     test_boot_framebuffer();
     test_matrix_multiply_order();
     test_light_definition_cache();
+    test_lit_vertex_cache();
     test_texture_compaction_order();
     puts("PSP HUD display list tests passed");
     return 0;

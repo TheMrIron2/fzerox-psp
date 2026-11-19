@@ -8,7 +8,7 @@
 
 static u16 sTestFrame[512 * 272];
 static u16 sReadback[320 * 240];
-static u8 sVertexMemory[2048] __attribute__((aligned(16)));
+static u8 sVertexMemory[GU_BATCH_VERTICES * sizeof(PspGfxVertex3D)] __attribute__((aligned(16)));
 static int sDrawCalls;
 static int sSubmittedCount;
 static int sClipPlanes;
@@ -33,6 +33,9 @@ static int sReflectionTextureStates[2];
 static int sReflectionBlendEnabled;
 static int sReflectionBlendStates[2];
 static int sBlendCalls;
+static int sBlendAtDraw;
+static int sScissorWrites;
+static int sDrawsBeforeScissor;
 
 void sceGuShadeModel(int mode) {
     sTestShadeModel = mode;
@@ -58,6 +61,7 @@ void sceGuDrawArray(int prim, int type, int count, const void* indices, const vo
     (void) prim; (void) indices;
     sDrawCalls++;
     sSubmittedCount = count;
+    sBlendAtDraw = sReflectionBlendEnabled;
     if (sCaptureReflection) {
         assert(sReflectionDraws < 2 && count == 3);
         sReflectionColors[sReflectionDraws] = ((const PspGfxVertex3D*) vertices)[0].color;
@@ -67,14 +71,19 @@ void sceGuDrawArray(int prim, int type, int count, const void* indices, const vo
     }
     if (sDepthPixelActive && !(type & GU_TRANSFORM_2D)) {
         const PspGfxVertex3D* triangle = vertices;
-        float depth = (1.0f - triangle[0].z) * 0.5f;
-        int passes = !sTestDepthEnabled || sTestDepthFunction == GU_ALWAYS ||
-                     (sTestDepthFunction == GU_GEQUAL && depth >= sPixelDepth);
+        int i;
 
-        assert(count == 3 && triangle[0].z == triangle[1].z && triangle[1].z == triangle[2].z);
-        if (passes) {
-            sPixelColor = triangle[0].color;
-            if (sTestDepthEnabled && sTestDepthMask == GU_FALSE) sPixelDepth = depth;
+        assert(count % 3 == 0);
+        for (i = 0; i < count; i += 3, triangle += 3) {
+            float depth = (1.0f - triangle[0].z) * 0.5f;
+            int passes = !sTestDepthEnabled || sTestDepthFunction == GU_ALWAYS ||
+                         (sTestDepthFunction == GU_GEQUAL && depth >= sPixelDepth);
+
+            assert(triangle[0].z == triangle[1].z && triangle[1].z == triangle[2].z);
+            if (passes) {
+                sPixelColor = triangle[0].color;
+                if (sTestDepthEnabled && sTestDepthMask == GU_FALSE) sPixelDepth = depth;
+            }
         }
     }
 }
@@ -127,6 +136,17 @@ void sceGuBlendFunc(int op, int src, int dst, unsigned int srcfix, unsigned int 
     (void) op; (void) src; (void) dst; (void) srcfix; (void) dstfix;
 }
 
+void sceGuScissor(int x, int y, int w, int h) {
+    (void) x; (void) y; (void) w; (void) h;
+    sScissorWrites++;
+    sDrawsBeforeScissor = sDrawCalls;
+}
+
+static void draw_triangles_and_flush(const PspGfxVertex3D vertices[3], u32 count, const PspGfxDrawState* state) {
+    PspGfx_DrawTriangles3D(vertices, count, state);
+    psp_gfx_gu_flush();
+}
+
 static void test_3d_texture_units(void) {
     PspGfxDrawState state;
     PspGfxVertex3D vertices[3];
@@ -144,7 +164,7 @@ static void test_3d_texture_units(void) {
     vertices[0].u = 16.0f;
     vertices[0].v = 32.0f;
     sGuReady = 1;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sClipPlanes);
     assert(sTestShadeModel == GU_SMOOTH);
     shadeCalls = sShadeCalls;
@@ -152,22 +172,22 @@ static void test_3d_texture_units(void) {
     assert(submitted[0].u * sScaleU == 1.0f);
     assert(submitted[0].v * sScaleV == 1.0f);
     calls = sScaleCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sScaleCalls == calls);
     assert(sShadeCalls == shadeCalls);
 
     state.smoothShade = 0;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sTestShadeModel == GU_FLAT);
     assert(sShadeCalls == shadeCalls + 1);
     state.smoothShade = 1;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sTestShadeModel == GU_SMOOTH);
     assert(sShadeCalls == shadeCalls + 2);
 
     state.texWidth = 64;
     state.texHeight = 16;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(submitted[0].u * sScaleU == 0.25f);
     assert(submitted[0].v * sScaleV == 2.0f);
 
@@ -175,7 +195,7 @@ static void test_3d_texture_units(void) {
     assert(!sClipPlanes);
     assert(((PspGuTexVertex*) sVertexMemory)[1].u == 16.0f);
     calls = sScaleCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sScaleCalls == calls + 1);
     assert(submitted[0].u * sScaleU == 0.25f);
     assert(submitted[0].v * sScaleV == 2.0f);
@@ -236,7 +256,7 @@ static void test_3d_clipping(void) {
     vertices[2].y = 100;
     set_clip_attributes(vertices);
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sClipPlanes && sDrawCalls == calls + 1 && sSubmittedCount == 6);
     check_clipped_vertices();
     for (i = 0; i < sSubmittedCount; i++) {
@@ -250,7 +270,7 @@ static void test_3d_clipping(void) {
         assert(area > 0);
     }
     state.smoothShade = 0;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     for (i = 0; i < sSubmittedCount; i++) assert(submitted[i].color == vertices[2].color);
 
     vertices[0].x = -100;
@@ -259,17 +279,17 @@ static void test_3d_clipping(void) {
     vertices[1].y = -0.1f;
     vertices[2].y = 0.1f;
     set_clip_attributes(vertices);
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sSubmittedCount == 6);
     check_clipped_vertices();
 
     for (i = 0; i < 3; i++) vertices[i].x = 2.0f;
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls);
     vertices[0].x = 4;
     vertices[1].x = vertices[2].x = 0;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sSubmittedCount == 3 && submitted[0].x == 4);
 
     projection.m[2][2] = -101.0f / 99.0f;
@@ -289,32 +309,32 @@ static void test_3d_clipping(void) {
     state.smoothShade = 1;
     set_clip_attributes(vertices);
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls + 1);
     check_clipped_vertices();
     assert(submitted[0].z < -0.99f);
 
     vertices[0].z = -0.5f;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sClipPlanes && sSubmittedCount == 3 && submitted[0].z == -0.5f);
     vertices[0].z = -200;
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls + 1);
     check_clipped_vertices();
 
     modelview.m[3][0] = 20;
     state.modelviewSerial++;
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls + 1);
     check_clipped_vertices();
     for (i = 0; i < 3; i++) vertices[i].z = 1;
     calls = sDrawCalls;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls);
     vertices[0].x = NAN;
-    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    draw_triangles_and_flush(vertices, 3, &state);
     assert(sDrawCalls == calls);
 }
 
@@ -325,7 +345,7 @@ static void draw_depth_layer(PspGfxDrawState* state, float z, u32 color) {
         { 0, 0, color, 0, 0.5f, z },
     };
 
-    PspGfx_DrawTriangles3D(vertices, 3, state);
+    draw_triangles_and_flush(vertices, 3, state);
 }
 
 static void test_ordered_road_depth(void) {
@@ -432,6 +452,67 @@ static void test_blend_reuse(void) {
     assert(!sReflectionBlendEnabled);
 }
 
+static void test_batches(void) {
+    PspGfxDrawState state = {0};
+    PspGfxVertex3D vertices[3] = {
+        { 0, 0, 0, -0.5f, -0.5f, 0 },
+        { 0, 0, 0, 0.5f, -0.5f, 0 },
+        { 0, 0, 0, 0, 0.5f, 0 },
+    };
+    const PspGfxVertex3D* submitted = (const PspGfxVertex3D*) sVertexMemory;
+    int calls;
+    int i;
+    int scissorWrites = sScissorWrites;
+
+    psp_gfx_gu_flush();
+    state.projection = (const float*) &sIdentityMatrix;
+    state.depthWrite = 1;
+    calls = sDrawCalls;
+    sDepthPixelActive = 1;
+    for (i = 0; i < GU_BATCH_VERTICES / 3; i++) {
+        vertices[0].color = i + 1;
+        PspGfx_DrawTriangles3D(vertices, 3, &state);
+    }
+    assert(sDrawCalls == calls);
+    vertices[0].color = 255;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sDrawCalls == calls + 1 && sSubmittedCount == GU_BATCH_VERTICES);
+    for (i = 0; i < sSubmittedCount / 3; i++) {
+        assert(submitted[3 * i].color == (u32) (i + 1));
+    }
+    assert(sPixelColor == GU_BATCH_VERTICES / 3);
+
+    PspGfx_SetScissor(10, 10, 20, 20);
+    assert(sDrawCalls == calls + 2 && sSubmittedCount == 3 && sPixelColor == 255);
+    assert(sScissorWrites == scissorWrites + 1 && sDrawsBeforeScissor == sDrawCalls);
+
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    state.depthTest = 1;
+    vertices[0].color = 1;
+    vertices[0].z = vertices[1].z = vertices[2].z = 0.5f;
+    sPixelDepth = 1.0f;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sDrawCalls == calls + 3 && sPixelDepth == 0.5f);
+    psp_gfx_gu_flush();
+    assert(sPixelColor == 255 && sPixelDepth == 0.5f);
+
+    sDepthPixelActive = 0;
+    state.depthTest = 0;
+    state.blend = 1;
+    calls = sDrawCalls;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    vertices[0].color = 2;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sDrawCalls == calls);
+
+    state.blend = 0;
+    PspGfx_DrawTriangles3D(vertices, 3, &state);
+    assert(sDrawCalls == calls + 1 && sSubmittedCount == 6 && sBlendAtDraw);
+    assert(submitted[0].color == 1 && submitted[3].color == 2);
+    psp_gfx_gu_flush();
+    assert(sDrawCalls == calls + 2 && sSubmittedCount == 3 && !sBlendAtDraw);
+}
+
 int main(void) {
     int x, y;
 
@@ -464,6 +545,7 @@ int main(void) {
     test_ordered_road_depth();
     test_reflection_pass();
     test_blend_reuse();
-    puts("PSP GU framebuffer texture coordinate clipping and depth tests passed");
+    test_batches();
+    puts("PSP GU framebuffer texture coordinate clipping depth and batching tests passed");
     return 0;
 }

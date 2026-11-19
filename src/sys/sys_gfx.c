@@ -2,6 +2,9 @@
 #include "audio.h"
 #include "fzx_game.h"
 #include "fzx_thread.h"
+#ifdef PSP
+#include "src/psp/profiler.h"
+#endif
 
 GfxPool* gGfxPool;
 OSTask* sGfxTask;
@@ -137,6 +140,10 @@ void Gfx_FullSync(void) {
 extern OSMesgQueue gMainThreadMesgQueue;
 extern s32 gGameMode;
 extern OSTask* gCurGfxTask;
+#ifdef PSP
+extern u32 gGameFrameCount;
+extern s32 gCourseIndex;
+#endif
 
 void Gfx_SetTask(OSTask* task) {
 
@@ -170,6 +177,9 @@ void Gfx_SetTask(OSTask* task) {
     task->t.data_size = (size_t) (gMasterDisp - gGfxPool->gfxBuffer) * sizeof(Gfx);
     task->t.yield_data_ptr = (u64*) gOSYieldData;
     task->t.yield_data_size = OS_YIELD_DATA_SIZE;
+#ifdef PSP
+    PspProfile_GameSubmit(task, gGameFrameCount, gGameMode, gCourseIndex);
+#endif
     gCurGfxTask = task;
     osSendMesg(&gMainThreadMesgQueue, (OSMesg) EVENT_MESG_GFX_TASK_SET, OS_MESG_BLOCK);
 }
@@ -181,12 +191,33 @@ extern FrameBuffer* gFrameBuffers[];
 void func_80067D64(void) {
     osRecvMesg(&D_800DCAB0, &D_800DCD10, OS_MESG_BLOCK);
     Audio_Update();
+#ifdef PSP
+    PspProfile_GameBegin();
+#endif
     Gfx_InitBuffer();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     func_800690FC();
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameUpdate((u32)(PROFILE_NOW() - t)); }
+#endif
     Gfx_LoadSegments();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     gMasterDisp = func_80069698(gMasterDisp);
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameDraw((u32)(PROFILE_NOW() - t)); }
+#endif
     Gfx_FullSync();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     osRecvMesg(&D_800DCAC8, &D_800DCD10, OS_MESG_BLOCK);
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameWait((u32)(PROFILE_NOW() - t)); }
+#endif
 
     while (osDpGetStatus() &
            (DPC_STATUS_DMA_BUSY | DPC_STATUS_CMD_BUSY | DPC_STATUS_PIPE_BUSY | DPC_STATUS_TMEM_BUSY)) {}
@@ -204,14 +235,35 @@ void func_80067E98(void) {
     s32 retries = 100000;
 
     osRecvMesg(&D_800DCAB0, &D_800DCD10, OS_MESG_BLOCK);
+#ifdef PSP
+    PspProfile_GameBegin();
+#endif
     Gfx_InitBuffer();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     func_800690FC();
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameUpdate((u32)(PROFILE_NOW() - t)); }
+#endif
     func_80067AE0();
     Gfx_LoadSegments();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     gMasterDisp = func_80069698(gMasterDisp);
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameDraw((u32)(PROFILE_NOW() - t)); }
+#endif
     Gfx_FullSync();
     Audio_Update();
+#ifdef PSP_PROFILE
+    { u64 t = PspProfile_Active() ? PROFILE_NOW() : 0;
+#endif
     osRecvMesg(&D_800DCAC8, &D_800DCD10, OS_MESG_BLOCK);
+#ifdef PSP_PROFILE
+    if (t) PspProfile_GameWait((u32)(PROFILE_NOW() - t)); }
+#endif
     Transition_SetBackgroundBuffer();
     osViSwapBuffer(gFrameBuffers[D_800DCD08]);
     Segment_LoadAssets();

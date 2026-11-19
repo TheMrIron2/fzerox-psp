@@ -66,10 +66,7 @@ CFLAGS += -D_LANGUAGE_C -DF3DEX_GBI_2 -D_MIPS_SZLONG=32
 CFLAGS += -fno-builtin -fno-common -fno-strict-aliasing -fwrapv -funsigned-char
 CFLAGS += -ffunction-sections -fdata-sections
 ifeq ($(PSP_FULL)$(PSP_PROFILE),11)
-CFLAGS += -DPSP_PROFILE=1 -DPSP_LOG_TO_FILE=1
-endif
-ifeq ($(PSP_GAME_PROFILE),1)
-CFLAGS += -DPSP_GAME_PROFILE=1
+CFLAGS += -DPSP_PROFILE=1 -DPSP_PROFILE_REVISION=\"$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)\"
 endif
 # Source text is UTF-8 but the game's font tables are indexed by EUC-JP codes
 CFLAGS += -finput-charset=UTF-8 -fexec-charset=EUC-JP

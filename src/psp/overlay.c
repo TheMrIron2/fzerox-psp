@@ -3,6 +3,7 @@
 #include <pspkernel.h>
 #include <stdio.h>
 #include "src/psp/overlay.h"
+#include "src/psp/profiler.h"
 
 static const u8 sFont[][5] = {
     {0,0,0,0,0}, {0,0,95,0,0}, {0,7,0,7,0}, {20,127,20,127,20},
@@ -36,8 +37,9 @@ int PspOverlay_Input(unsigned int buttons) {
     consume = sOpen;
     if (pressed & PSP_CTRL_SELECT) {
         sOpen = !sOpen;
-        if (!sOpen) sRelease = 1;
+        if (!sOpen) { sRelease = 1; PspProfile_Control(1); }
     }
+    if (sOpen && (pressed & PSP_CTRL_CROSS)) PspProfile_Control(0);
     if (sRelease && !(buttons & (PSP_CTRL_SELECT | PSP_CTRL_UP | PSP_CTRL_DOWN | PSP_CTRL_LEFT | PSP_CTRL_RIGHT | PSP_CTRL_CROSS))) sRelease = 0;
     return consume || sOpen || sRelease;
 }
@@ -102,6 +104,10 @@ void PspOverlay_Draw(void) {
     if (open) {
         overlay_text(v, &n, 4, 20, "F ZERO X OPTIONS");
         overlay_text(v, &n, 4, 60, "SELECT CLOSE");
+#ifdef PSP_PROFILE
+        snprintf(text, sizeof(text), "CROSS PROFILE %s", PspProfile_Status());
+        overlay_text(v, &n, 4, 40, text);
+#endif
         snprintf(text, sizeof(text), "CPU %u.%u GE WAIT %u.%u MS", sWorkTenths / 10, sWorkTenths % 10,
                  sSyncTenths / 10, sSyncTenths % 10);
         overlay_text(v, &n, 4, 76, text);

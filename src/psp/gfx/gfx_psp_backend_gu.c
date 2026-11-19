@@ -9,6 +9,7 @@
 #include "src/psp/gfx/gfx_psp.h"
 #include "src/psp/psp.h"
 #include "src/psp/overlay.h"
+#include "src/psp/profiler.h"
 
 #define GU_LIST_WORDS 0x40000
 #define GU_FB_WIDTH 512
@@ -18,6 +19,7 @@
 #define GU_DISP_OFFSET (GU_FB_STRIDE * GU_FB_HEIGHT)
 #define GU_THIRD_OFFSET (GU_DISP_OFFSET * 2)
 #define GU_DEPTH_OFFSET (GU_DISP_OFFSET * 3)
+#define GU_BATCH_VERTICES 192
 
 #define PSP_SCREEN_W 480.0f
 #define PSP_SCREEN_H 272.0f
@@ -30,6 +32,8 @@ static u32 sDrawOffset = GU_DRAW_OFFSET;
 static u32 sPendingOffset = GU_DISP_OFFSET;
 static const volatile u16* sLastFrame;
 static u64 sFrameStartUs;
+static PspGfxVertex3D sBatchVertices[GU_BATCH_VERTICES];
+static u32 sBatchCount;
 #ifdef PSP_PROFILE
 u32 gPspProfileSyncUs;
 u32 gPspProfileVblankUs;
@@ -89,6 +93,8 @@ static float s2dScaleY;
 static float s2dOffsetX;
 static float s2dOffsetY;
 
+static void psp_gfx_gu_flush(void);
+
 static u32 psp_gfx_free_buffer(u32 displayed, u32 pending) {
     u32 offset;
     for (offset = 0; offset < GU_DEPTH_OFFSET; offset += GU_DISP_OFFSET) {
@@ -124,6 +130,7 @@ static void psp_gfx_gu_viewport(int wide) {
 
 /* 2D overlays must not inherit the 3D depth state */
 static void psp_gfx_gu_2d_state(void) {
+    psp_gfx_gu_flush();
     psp_gfx_gu_viewport(1);
     if (sDepthTestEnabled) {
         sceGuDisable(GU_DEPTH_TEST);
@@ -140,6 +147,7 @@ static void psp_gfx_gu_2d_state(void) {
 
 static void psp_gfx_gu_blend(int enabled) {
     if (sBlendEnabled == enabled) return;
+    psp_gfx_gu_flush();
     if (enabled) {
         sceGuEnable(GU_BLEND);
         sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
@@ -207,6 +215,7 @@ int PspGfx_Init(void) {
 }
 
 void PspGfx_BeginFrame(void) {
+    sBatchCount = 0;
     sFrameStartUs = sceKernelGetSystemTimeWide();
     sceGuStart(GU_DIRECT, sGuList);
     sceGuDrawBufferList(GU_PSM_5650, (void*) sDrawOffset, GU_FB_WIDTH);
@@ -237,29 +246,21 @@ void PspGfx_BeginFrame(void) {
 
 void PspGfx_Present(void) {
     u64 workEnd, syncEnd, waitStart, waitEnd;
-#ifdef PSP_PROFILE
-    u64 syncStart;
-#endif
     if (!sGuReady) {
         return;
     }
 
+    psp_gfx_gu_flush();
     PspOverlay_Draw();
     sceGuFinish();
     workEnd = sceKernelGetSystemTimeWide();
-#ifdef PSP_PROFILE
-    syncStart = sceKernelGetSystemTimeWide();
-#endif
     sceGuSync(0, 0);
     syncEnd = sceKernelGetSystemTimeWide();
 #ifdef PSP_PROFILE
-    gPspProfileSyncUs = (u32) (sceKernelGetSystemTimeWide() - syncStart);
+    gPspProfileSyncUs = (u32) (syncEnd - workEnd);
 #endif
     /* The GU is done with the decoded tiles queued this frame */
     PspGfx_EndFrame();
-#ifdef PSP_PROFILE
-    syncStart = sceKernelGetSystemTimeWide();
-#endif
     waitStart = sceKernelGetSystemTimeWide();
     {
         void* current;
@@ -283,7 +284,7 @@ void PspGfx_Present(void) {
     }
     waitEnd = sceKernelGetSystemTimeWide();
 #ifdef PSP_PROFILE
-    gPspProfileVblankUs = (u32) (sceKernelGetSystemTimeWide() - syncStart);
+    gPspProfileVblankUs = (u32) (waitEnd - waitStart);
 #endif
     PspOverlay_RecordFrame((u32) (workEnd - sFrameStartUs), (u32) (syncEnd - workEnd),
                            (u32) (waitEnd - waitStart), sceKernelGetSystemTimeWide());
@@ -341,6 +342,8 @@ void PspGfx_DrawTexQuad(s32 x0, s32 y0, s32 x1, s32 y1, const u16* pixels, s32 t
     }
     sceGuEnable(GU_TEXTURE_2D);
     sceGuTexMode(GU_PSM_4444, 0, 0, 0);
+    PROFILE_COUNT(texture_binds, 1);
+    PROFILE_COUNT(texture_bytes, texW * texH * sizeof(u16));
     sceKernelDcacheWritebackRange((void*) pixels, texW * texH * sizeof(u16));
     sceGuTexImage(0, texW, texH, texW, pixels);
     sceGuTexFlush();
@@ -390,6 +393,7 @@ void PspGfx_SetScissor(s32 x0, s32 y0, s32 x1, s32 y1) {
     if (sx1 <= sx0 || sy1 <= sy0) {
         return;
     }
+    psp_gfx_gu_flush();
     sceGuEnable(GU_SCISSOR_TEST);
     sceGuScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
 }
@@ -419,16 +423,80 @@ void PspGfx_DrawTriangle2D(const PspGfxVertex v[3]) {
     sceGuDrawArray(GU_TRIANGLES, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 3, NULL, out);
 }
 
-static void psp_gfx_gu_submit(const PspGfxVertex3D* vertices, u32 count) {
+static int psp_gfx_gu_submit_inner(const PspGfxVertex3D* vertices, u32 count, int batch) {
     PspGfxVertex3D* out;
+    u32 i;
+#ifdef PSP_PROFILE
+    u64 copyStart;
+#endif
 
     out = (PspGfxVertex3D*) sceGuGetMemory(count * sizeof(PspGfxVertex3D));
     if (out == NULL) {
-        return;
+        return 0;
     }
-    memcpy(out, vertices, count * sizeof(*out));
+    PROFILE_COUNT(draws, 1);
+    PROFILE_COUNT(submitted_vertices, count);
+#ifdef PSP_PROFILE
+    copyStart = batch && gPspProfileFrame ? PROFILE_NOW() : 0;
+#endif
+    /* GU vertex memory is word aligned and uncached */
+    for (i = 0; i < count; i++) {
+        out[i] = vertices[i];
+    }
+#ifdef PSP_PROFILE
+    if (batch && gPspProfileFrame) {
+        gPspProfileFrame->batch_copy_us += (u32) (PROFILE_NOW() - copyStart);
+    }
+#endif
     sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, count,
                    NULL, out);
+    return 1;
+}
+
+static void psp_gfx_gu_flush(void) {
+#ifdef PSP_PROFILE
+    u64 start;
+#endif
+    if (sBatchCount == 0) {
+        return;
+    }
+#ifdef PSP_PROFILE
+    start = gPspProfileFrame ? PROFILE_NOW() : 0;
+#endif
+    if (psp_gfx_gu_submit_inner(sBatchVertices, sBatchCount, 1)) {
+        PROFILE_COUNT(batch_draws, 1);
+        PROFILE_COUNT(batch_vertices, sBatchCount);
+    }
+#ifdef PSP_PROFILE
+    if (gPspProfileFrame) {
+        gPspProfileFrame->batch_submit_us += (u32) (PROFILE_NOW() - start);
+    }
+#endif
+    sBatchCount = 0;
+}
+
+static void psp_gfx_gu_queue_triangle(const PspGfxVertex3D vertices[3]) {
+    if (sBatchCount == GU_BATCH_VERTICES) {
+        psp_gfx_gu_flush();
+    }
+    sBatchVertices[sBatchCount] = vertices[0];
+    sBatchVertices[sBatchCount + 1] = vertices[1];
+    sBatchVertices[sBatchCount + 2] = vertices[2];
+    sBatchCount += 3;
+}
+
+static void psp_gfx_gu_submit(const PspGfxVertex3D* vertices, u32 count) {
+#ifdef PSP_PROFILE
+    u64 start;
+#endif
+    psp_gfx_gu_flush();
+#ifdef PSP_PROFILE
+    start = gPspProfileSample ? PROFILE_NOW() : 0;
+#endif
+    psp_gfx_gu_submit_inner(vertices, count, 0);
+#ifdef PSP_PROFILE
+    if (gPspProfileSample) gPspProfileFrame->submit_us += (u32)(PROFILE_NOW() - start);
+#endif
 }
 
 static PspGfxVertex3D psp_gfx_gu_interpolate(const PspGfxVertex3D vertices[3], const float weight[3], int smooth) {
@@ -455,7 +523,7 @@ static PspGfxVertex3D psp_gfx_gu_interpolate(const PspGfxVertex3D vertices[3], c
     return out;
 }
 
-static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smooth) {
+static void psp_gfx_gu_clip_triangle_inner(const PspGfxVertex3D vertices[3], int smooth, int batch) {
     n64psp_vec4f positions[3];
     n64psp_vec4f_pair transformed[3];
     n64psp_vec4f clip[3];
@@ -463,6 +531,7 @@ static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smoot
     int safe = 1;
     u32 i;
 
+    PROFILE_COUNT(clip_calls, 1);
     for (i = 0; i < 3; i++) {
         positions[i].x = vertices[i].x;
         positions[i].y = vertices[i].y;
@@ -488,16 +557,22 @@ static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smoot
         }
     }
     if (shared != 0) {
+        PROFILE_COUNT(clip_rejects, 1);
         return;
     }
     if (safe) {
         /* The GE clips the near plane and keeps perspective interpolation */
-        psp_gfx_gu_submit(vertices, 3);
+        if (batch) {
+            psp_gfx_gu_queue_triangle(vertices);
+        } else {
+            psp_gfx_gu_submit(vertices, 3);
+        }
     } else {
         n64psp_clip_vertex clipped[N64PSP_CLIP_MAX_VERTICES];
         PspGfxVertex3D polygon[N64PSP_CLIP_MAX_VERTICES];
         PspGfxVertex3D triangles[(N64PSP_CLIP_MAX_VERTICES - 2) * 3];
         size_t count = n64psp_clip_triangle(clipped, clip);
+        PROFILE_COUNT(clipped, 1);
         u32 emitted = 0;
 
         for (i = 0; i < count; i++) {
@@ -517,6 +592,16 @@ static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smoot
     }
 }
 
+static void psp_gfx_gu_clip_triangle(const PspGfxVertex3D vertices[3], int smooth, int batch) {
+#ifdef PSP_PROFILE
+    u64 start = gPspProfileSample ? PROFILE_NOW() : 0;
+#endif
+    psp_gfx_gu_clip_triangle_inner(vertices, smooth, batch);
+#ifdef PSP_PROFILE
+    if (gPspProfileSample) gPspProfileFrame->clip_us += (u32)(PROFILE_NOW() - start);
+#endif
+}
+
 void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const PspGfxDrawState* state) {
     int shadeModel;
     int depthEnabled;
@@ -531,11 +616,13 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
     psp_gfx_gu_viewport(0);
     shadeModel = state->smoothShade ? GU_SMOOTH : GU_FLAT;
     if (sShadeModel != shadeModel) {
+        psp_gfx_gu_flush();
         sceGuShadeModel(shadeModel);
         sShadeModel = shadeModel;
     }
 
     if (!sMatrixValid || sProjection != state->projection || sProjectionSerial != state->projectionSerial) {
+        psp_gfx_gu_flush();
         sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4*) state->projection);
         sProjection = state->projection;
         sProjectionSerial = state->projectionSerial;
@@ -545,6 +632,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sceGuSetMatrix(GU_VIEW, &sIdentityMatrix);
     }
     if (!sMatrixValid || sModelview != state->modelview || sModelviewSerial != state->modelviewSerial) {
+        psp_gfx_gu_flush();
         sceGuSetMatrix(GU_MODEL, state->modelview != NULL ? (const ScePspFMatrix4*) state->modelview
                                                           : &sIdentityMatrix);
         sModelview = state->modelview;
@@ -558,6 +646,7 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
     depthEnabled = state->depthTest || state->depthWrite;
     depthFunction = state->depthTest ? GU_GEQUAL : GU_ALWAYS;
     if (sDepthTestEnabled != depthEnabled) {
+        psp_gfx_gu_flush();
         if (depthEnabled) {
             sceGuEnable(GU_DEPTH_TEST);
         } else {
@@ -566,25 +655,30 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         sDepthTestEnabled = depthEnabled;
     }
     if (depthEnabled && sDepthFunction != depthFunction) {
+        psp_gfx_gu_flush();
         sceGuDepthFunc(depthFunction);
         sDepthFunction = depthFunction;
     }
     if (sDepthWriteEnabled != (state->depthWrite != 0)) {
+        psp_gfx_gu_flush();
         sceGuDepthMask(state->depthWrite ? GU_FALSE : GU_TRUE);
         sDepthWriteEnabled = state->depthWrite != 0;
     }
 
     if (state->cullFront || state->cullBack) {
         if (!sCullEnabled) {
+            psp_gfx_gu_flush();
             sceGuEnable(GU_CULL_FACE);
             sCullEnabled = 1;
         }
         if (sCullFront != (state->cullFront != 0)) {
+            psp_gfx_gu_flush();
             /* Map N64 cull mode onto GU front-face winding */
             sceGuFrontFace(state->cullBack ? GU_CCW : GU_CW);
             sCullFront = state->cullFront != 0;
         }
     } else if (sCullEnabled) {
+        psp_gfx_gu_flush();
         sceGuDisable(GU_CULL_FACE);
         sCullEnabled = 0;
     }
@@ -599,8 +693,11 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
         if (!sTexBoundValid || sTexBoundPixels != state->texturePixels ||
             sTexBoundWidth != state->texWidth || sTexBoundHeight != state->texHeight ||
             sTexBoundTexFunc != texFunc || sTexBoundWrap != wrap || sTexBoundFilter != filter) {
+            psp_gfx_gu_flush();
             sceGuEnable(GU_TEXTURE_2D);
             sceGuTexMode(GU_PSM_4444, 0, 0, 0);
+            PROFILE_COUNT(texture_binds, 1);
+            PROFILE_COUNT(texture_bytes, state->texWidth * state->texHeight * sizeof(u16));
             sceKernelDcacheWritebackRange((void*) state->texturePixels,
                                           (unsigned) (state->texWidth * state->texHeight * (s32) sizeof(u16)));
             sceGuTexImage(0, state->texWidth, state->texHeight, state->texWidth, state->texturePixels);
@@ -620,12 +717,19 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
             sTexBoundValid = 1;
         }
     } else {
+        if (sTexBoundValid) {
+            psp_gfx_gu_flush();
+        }
         sceGuDisable(GU_TEXTURE_2D);
         sTexBoundValid = 0;
     }
 
+    /* Keep each base triangle before its overlay */
+    if (state->reflection) {
+        psp_gfx_gu_flush();
+    }
     for (i = 0; i < count; i += 3) {
-        psp_gfx_gu_clip_triangle(vertices + i, state->smoothShade);
+        psp_gfx_gu_clip_triangle(vertices + i, state->smoothShade, !state->reflection);
         if (state->reflection) {
             PspGfxVertex3D overlay[3];
             u32 j;
@@ -640,7 +744,8 @@ void PspGfx_DrawTriangles3D(const PspGfxVertex3D* vertices, u32 count, const Psp
             psp_gfx_gu_blend(1);
             sceGuDepthMask(GU_TRUE);
             sDepthWriteEnabled = 0;
-            psp_gfx_gu_clip_triangle(overlay, state->smoothShade);
+            PROFILE_COUNT(reflections, 1);
+            psp_gfx_gu_clip_triangle(overlay, state->smoothShade, 0);
             if (state->depthWrite) {
                 sceGuDepthMask(GU_FALSE);
                 sDepthWriteEnabled = 1;

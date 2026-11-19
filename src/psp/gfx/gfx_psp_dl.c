@@ -1,6 +1,7 @@
 #include "src/psp/gfx/gfx_psp.h"
 #include "src/psp/n64ram.h"
 #include "src/psp/psp.h"
+#include "src/psp/profiler.h"
 #include "PR/mbi.h"
 #include "PR/gu.h"
 
@@ -179,8 +180,10 @@ void PspGfx_SetMicrocode(const void* text) {
 }
 
 /* Lighting scratch */
-static n64psp_snorm8x4 sLitNormals[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
-static n64psp_vec4f sLitOutput[PSP_GFX_MAX_VTX] __attribute__((aligned(16)));
+static n64psp_snorm8x4 sLitNormals[3] __attribute__((aligned(16)));
+static n64psp_vec4f sLitOutput[3] __attribute__((aligned(16)));
+static u32 sLitVertexRgb[PSP_GFX_MAX_VTX];
+static u8 sLitVertexValid[PSP_GFX_MAX_VTX];
 static n64psp_directional_lightf sLitLights[8] __attribute__((aligned(16)));
 static n64psp_vec4f sLitAmbient __attribute__((aligned(16)));
 static n64psp_mat4f sLitNormalMatrix __attribute__((aligned(16)));
@@ -527,6 +530,7 @@ static void psp_gfx_build_light_defs(void) {
 
     if (!sLightDefsDirty) return;
     sLightDefsDirty = 0;
+    memset(sLitVertexValid, 0, sizeof(sLitVertexValid));
     for (i = 0; i < sNumLights && i < 8; i++) {
         float x = sModelView[0][0] * sLightSlots[i].x + sModelView[0][1] * sLightSlots[i].y +
                   sModelView[0][2] * sLightSlots[i].z;
@@ -557,6 +561,48 @@ static void psp_gfx_build_light_defs(void) {
         for (j = 0; j < 4; j++) {
             sLitNormalMatrix.m[i][j] = sModelView[i][j];
         }
+    }
+}
+
+static void psp_gfx_light_triangle(const u32 indices[3]) {
+    u32 missing[3];
+    u32 count = 0;
+    u32 i;
+
+    psp_gfx_build_light_defs();
+    PROFILE_COUNT(lit_vertices, 3);
+    for (i = 0; i < 3; i++) {
+        u32 index = indices[i];
+        const Vtx* vertex = &sVtx[index];
+
+        if (sLitVertexValid[index]) {
+            continue;
+        }
+        sLitVertexValid[index] = 1;
+        missing[count] = index;
+        sLitNormals[count].x = (s8) vertex->v.cn[0];
+        sLitNormals[count].y = (s8) vertex->v.cn[1];
+        sLitNormals[count].z = (s8) vertex->v.cn[2];
+        sLitNormals[count].w = 0;
+        count++;
+    }
+    if (count == 0) {
+        return;
+    }
+
+    PROFILE_COUNT(lit_vertices_computed, count);
+    n64psp_directional_light_snorm8_batch(sLitOutput, &sLightIdentity, sLitNormals, sLitLights,
+                                         &sLitAmbient, (size_t) sNumLights, count);
+    for (i = 0; i < count; i++) {
+        float x = sLitNormals[i].x;
+        float y = sLitNormals[i].y;
+        float z = sLitNormals[i].z;
+        float magnitude = sqrtf(x * x + y * y + z * z) / 127.0f;
+        u32 r = psp_gfx_remap_light(sLitAmbient.x + (sLitOutput[i].x - sLitAmbient.x) * magnitude);
+        u32 g = psp_gfx_remap_light(sLitAmbient.y + (sLitOutput[i].y - sLitAmbient.y) * magnitude);
+        u32 b = psp_gfx_remap_light(sLitAmbient.z + (sLitOutput[i].z - sLitAmbient.z) * magnitude);
+
+        sLitVertexRgb[missing[i]] = r | (g << 8) | (b << 16);
     }
 }
 
@@ -698,7 +744,7 @@ static void psp_gfx_3d_texgen(const u32* idx, float* outU, float* outV) {
     }
 }
 
-static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
+static void psp_gfx_triangle3d_inner(u32 i0, u32 i1, u32 i2) {
     PspGfxVertex3D tri[3];
     PspGfxDrawState state;
     u32 idx[3];
@@ -771,32 +817,19 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
 
     if (lit) {
+#ifdef PSP_PROFILE
+        u64 lightStart = gPspProfileSample ? PROFILE_NOW() : 0;
+#endif
         if (traceLit) {
             PspLog("[gfx] first lit texture ready tex=%d\n", textured);
         }
-        for (k = 0; k < 3; k++) {
-            const Vtx* v = &sVtx[idx[k]];
-
-            sLitNormals[k].x = (s8) v->v.cn[0];
-            sLitNormals[k].y = (s8) v->v.cn[1];
-            sLitNormals[k].z = (s8) v->v.cn[2];
-            sLitNormals[k].w = 0;
-        }
-        psp_gfx_build_light_defs();
-        n64psp_directional_light_snorm8_batch(sLitOutput, &sLightIdentity, sLitNormals, sLitLights,
-                                             &sLitAmbient, (size_t) sNumLights, 3);
-        for (k = 0; k < 3; k++) {
-            float x = sLitNormals[k].x;
-            float y = sLitNormals[k].y;
-            float z = sLitNormals[k].z;
-            float magnitude = sqrtf(x * x + y * y + z * z) / 127.0f;
-            sLitOutput[k].x = sLitAmbient.x + (sLitOutput[k].x - sLitAmbient.x) * magnitude;
-            sLitOutput[k].y = sLitAmbient.y + (sLitOutput[k].y - sLitAmbient.y) * magnitude;
-            sLitOutput[k].z = sLitAmbient.z + (sLitOutput[k].z - sLitAmbient.z) * magnitude;
-        }
+        psp_gfx_light_triangle(idx);
         if (traceLit) {
             PspLog("[gfx] first lit lighting ready\n");
         }
+#ifdef PSP_PROFILE
+        if (gPspProfileSample) gPspProfileFrame->light_us += (u32)(PROFILE_NOW() - lightStart);
+#endif
     }
 
     if (texgen && textured) {
@@ -828,9 +861,11 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
         u32 a;
 
         if (lit) {
-            r = psp_gfx_remap_light(sLitOutput[k].x);
-            g = psp_gfx_remap_light(sLitOutput[k].y);
-            b = psp_gfx_remap_light(sLitOutput[k].z);
+            u32 rgb = sLitVertexRgb[idx[k]];
+
+            r = rgb & 0xFF;
+            g = (rgb >> 8) & 0xFF;
+            b = rgb >> 16;
             a = v->v.cn[3];
             if (a == 0) {
                 a = 255;
@@ -934,10 +969,27 @@ static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
     }
 }
 
+static void psp_gfx_triangle3d(u32 i0, u32 i1, u32 i2) {
+#ifdef PSP_PROFILE
+    u64 start = 0;
+    gPspProfileSample = gPspProfileFrame && (gPspProfileFrame->triangles % 16 == 0);
+    if (gPspProfileSample) {
+        gPspProfileFrame->samples++;
+        start = PROFILE_NOW();
+    }
+#endif
+    psp_gfx_triangle3d_inner(i0, i1, i2);
+#ifdef PSP_PROFILE
+    if (gPspProfileSample) gPspProfileFrame->triangle_us += (u32)(PROFILE_NOW() - start);
+    gPspProfileSample = 0;
+#endif
+}
+
 static void psp_gfx_triangle(u32 i0, u32 i1, u32 i2) {
     PspGfxVertex tri[3];
     static int sLoggedPath;
 
+    PROFILE_COUNT(triangles, 1);
     if (sColorTarget != 0 && !psp_gfx_targets_display()) {
         return;
     }
@@ -1311,9 +1363,11 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
             (!variant || (e->prim == sPrimColor8888 && e->env == sEnvColor && e->combine0 == sCombineW0 &&
                           e->combine1 == sCombineW1 && e->mode == sOtherModeH && e->lod == sPrimLodFrac))) {
             e->stamp = sFrameStamp;
+            PROFILE_COUNT(texture_hits, 1);
             return e;
         }
     }
+    PROFILE_COUNT(texture_misses, 1);
     potW = psp_gfx_next_pow2(bakedW);
     potH = psp_gfx_next_pow2(bakedH);
     if (potW < 8) {
@@ -1368,6 +1422,7 @@ static PspTexEntry* psp_gfx_tex_get(u32 fmt, u32 siz, u32 width, u32 height, u32
     e->potH = potH;
     e->stamp = sFrameStamp;
     sTexDecodeCount++;
+    PROFILE_COUNT(decodes, 1);
     /* Each queued texture starts on a cache line */
     e->pixels = &sTexPool[sTexPoolUsed];
     sTexPoolUsed += count;
@@ -1458,6 +1513,7 @@ static void psp_gfx_walk(const Gfx* dl) {
         u32 w1 = cur->words.w1;
         u32 op = w0 >> 24;
 
+        PROFILE_COUNT(commands, 1);
         sBudget--;
 
         switch (op) {
@@ -1491,8 +1547,10 @@ static void psp_gfx_walk(const Gfx* dl) {
                 const Vtx* src = (const Vtx*) (u32) psp_gfx_ram_addr(w1);
                 u32 i;
 
+                PROFILE_COUNT(vertices, n);
                 for (i = 0; i < n && (v0 + i) < PSP_GFX_MAX_VTX; i++) {
                     sVtx[v0 + i] = src[i];
+                    sLitVertexValid[v0 + i] = 0;
                     sVtxTexcoord[v0 + i][0] = (float) src[i].v.tc[0] * (float) sTextureScaleS / 65536.0f;
                     sVtxTexcoord[v0 + i][1] = (float) src[i].v.tc[1] * (float) sTextureScaleT / 65536.0f;
                 }
@@ -1502,6 +1560,7 @@ static void psp_gfx_walk(const Gfx* dl) {
                 u32 params = (w0 & 0xFF) ^ G_MTX_PUSH;
                 float mf[4][4];
 
+                PROFILE_COUNT(matrices, 1);
                 psp_gfx_mtx_l2f(mf, (const Mtx*) (u32) psp_gfx_ram_addr(w1));
 
                 if (params & G_MTX_PROJECTION) {

@@ -14,6 +14,7 @@ PSP_PLATFORM_C_FILES := \
     src/psp/segments.c \
     src/psp/log.c \
     src/psp/overlay.c \
+    src/psp/profiler.c \
     src/psp/gfx/gfx_psp_dl.c \
     src/psp/gfx/gfx_psp_backend_gu.c
 
